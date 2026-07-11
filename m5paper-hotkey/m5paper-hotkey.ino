@@ -53,7 +53,7 @@ const int MAX_SLOTS = 12;
 const uint64_t TIMER_WAKE_INTERVAL_US = 180ULL * 1000000ULL; // background sync every 3 min
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "4";
+const char* FIRMWARE_VERSION = "5";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -90,15 +90,17 @@ void applyOrientation() {
   M5.Display.setRotation(g_orientation == "portrait" ? 0 : 1);
 }
 
+const int HEADER_H = 60; // fixed/compact, was height*0.16 (86px landscape, 154px portrait)
+int16_t g_refreshBtnX, g_refreshBtnY, g_refreshBtnW, g_refreshBtnH;
+
 void layoutSlots() {
   applyOrientation();
   int W = M5.Display.width();
   int H = M5.Display.height();
-  int statusH = H * 0.16;
   int margin = 14;
   int cols = max(1, g_cols);
   int rows = max(1, g_rows);
-  int gridTop = statusH + margin;
+  int gridTop = HEADER_H + margin;
   int gridH = H - gridTop - margin;
   int cellW = (W - margin * (cols + 1)) / cols;
   int cellH = (gridH - margin * (rows - 1)) / rows;
@@ -110,6 +112,11 @@ void layoutSlots() {
     g_slots[i].w = cellW;
     g_slots[i].h = cellH;
   }
+
+  g_refreshBtnW = 48;
+  g_refreshBtnH = 48;
+  g_refreshBtnX = W - g_refreshBtnW - 8;
+  g_refreshBtnY = 6;
 }
 
 void ensureWiFi() {
@@ -321,21 +328,24 @@ void drawUIOnce() {
   d.fillScreen(COL_WHITE);
 
   int W = d.width();
-  int statusH = d.height() * 0.16;
-  d.drawFastHLine(0, statusH - 1, W, COL_BLACK);
-  d.drawFastHLine(0, statusH - 2, W, COL_BLACK);
+  d.drawFastHLine(0, HEADER_H - 1, W, COL_BLACK);
+  d.drawFastHLine(0, HEADER_H - 2, W, COL_BLACK);
 
   d.setTextColor(COL_BLACK, COL_WHITE);
   d.setTextDatum(top_left);
-  d.setTextSize(3);
-  d.setCursor(16, 8);
+  d.setTextSize(2);
+  d.setCursor(16, 6);
   d.print("Garage Monitor");
 
-  d.setTextSize(2);
-  d.setCursor(16, statusH - 36);
+  d.setCursor(16, 28);
   String stateStr = g_state.length() ? g_state : "unknown";
   String srcStr = g_source.length() ? g_source : "-";
   d.printf("Power: %s   Source: %s", stateStr.c_str(), srcStr.c_str());
+
+  const uint8_t* refreshIcon = findIcon("mdi:refresh");
+  if (refreshIcon) {
+    d.drawBitmap(g_refreshBtnX, g_refreshBtnY, refreshIcon, ICON_SIZE, ICON_SIZE, COL_BLACK, COL_WHITE);
+  }
 
   for (int i = 0; i < g_activeCount; i++) {
     drawSlot(g_slots[i], slotIsActive(g_slots[i]));
@@ -428,7 +438,15 @@ void loop() {
   if (M5.Touch.getCount()) {
     auto t = M5.Touch.getDetail(0);
     if (t.wasReleased()) {
-      for (int i = 0; i < g_activeCount; i++) {
+      if (t.x >= g_refreshBtnX && t.x <= g_refreshBtnX + g_refreshBtnW &&
+          t.y >= g_refreshBtnY && t.y <= g_refreshBtnY + g_refreshBtnH) {
+        Serial.println("[loop] touch hit header refresh button");
+        haGetState(g_state, g_source);
+        refreshLayoutAndSlots();
+        drawUI();
+        handledTouch = true;
+      }
+      for (int i = 0; !handledTouch && i < g_activeCount; i++) {
         Slot &s = g_slots[i];
         if (t.x >= s.x && t.x <= s.x + s.w && t.y >= s.y && t.y <= s.y + s.h) {
           Serial.printf("[loop] touch hit slot %d ('%s')\n", i, s.label.c_str());

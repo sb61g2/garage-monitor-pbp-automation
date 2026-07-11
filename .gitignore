@@ -1,0 +1,4 @@
+build/
+.DS_Store
+.claude/
+m5paper-hotkey/secrets.h

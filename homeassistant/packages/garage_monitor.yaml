@@ -1,0 +1,252 @@
+# Garage Monitor (Samsung G95SC) control
+#
+# Entities used: media_player.garage_garage_monitor_ls49cg954snxza,
+#                remote.garage_garage_monitor_ls49cg954snxza
+#
+# Power: media_player.turn_on (Wake-on-LAN) does not work on this monitor -
+# confirmed 2026-07-11 the monitor's network/Tizen stack stays fully live
+# even in standby (PowerState: standby, but pingable and REST API reachable),
+# so WOL is never needed/honored. KEY_POWER via remote.send_command works
+# instead, but it's a physical toggle key, so every use here is guarded by a
+# state condition to avoid accidentally flipping the wrong direction.
+#
+# HDMI/DisplayPort selection uses remote key navigation rather than
+# media_player.select_source, because the Samsung integration's source_list
+# only exposes ["TV", "HDMI"] - DisplayPort has no native select_source path.
+# The KEY_SOURCE menu is navigated by first pressing UP three times to clamp
+# to the top of the list (Samsung TV Plus) regardless of the current
+# highlight, then DOWN N times to the target row. This also collapses
+# Multi View back to a single input.
+#
+# Multi View (PBP) sequence confirmed working 2026-07-11: Home, Left, Down,
+# Down, Select, Select, Select. Produces one fixed HDMI+DisplayPort layout;
+# the orientation (which side each source lands on) has not been isolated.
+#
+# The input/Multi View scripts wake the monitor first only if it's off
+# (skipped entirely when already on, so the common case has no added delay).
+#
+# input_select.garage_monitor_source: the samsungtv integration's
+# media_player entity never reports a current source attribute (confirmed
+# 2026-07-11 - only a static source_list is exposed), so there is no way to
+# read the monitor's actual active input back from HA. This helper is
+# self-tracked instead: each input-changing script sets it as its last step.
+# It will be wrong if the input is changed by some means outside these
+# scripts (e.g. the physical remote), but accurate for everything done
+# through HA or the M5Paper hotkey pad.
+
+input_select:
+  garage_monitor_source:
+    name: Garage Monitor Source
+    icon: mdi:video-input-hdmi
+    options:
+      - Unknown
+      - HDMI
+      - DisplayPort
+      - Multi View
+    initial: Unknown
+
+# input_text.garage_monitor_slot_0..5: the M5Paper hotkey pad's button
+# layout, one JSON object per grid slot (3 cols x 2 rows, row-major, slot 0
+# = top-left). input_text has a hard 255-char max in this HA version, which
+# is too small for one JSON blob holding all 6 buttons, hence one entity
+# per slot. Edited via the "Garage Monitor Hotkey Layout" card on the
+# dashboard; the M5Paper firmware polls these (same cadence as its status
+# poll) and rebuilds its on-screen grid from whatever it finds here.
+#
+# Schema per slot: {"label": str, "icon": "mdi:xxx", "domain": str, "service":
+# str, "entity": entity_id (domain/service/entity all "" for a refresh-only
+# button), "matchType": "source"|"state"|"none", "match": str}. The firmware
+# calls POST /api/services/<domain>/<service> with {"entity_id": entity} on
+# tap - this is a generic HA service call, not limited to scripts.
+# matchType/match decide when the firmware highlights the button as
+# "active": "source" compares against input_select.garage_monitor_source,
+# "state" compares against media_player state (on/off), "none" never
+# highlights.
+input_text:
+  garage_monitor_slot_0:
+    name: Garage Monitor Slot 0
+    max: 255
+    initial: '{"label":"HDMI","icon":"mdi:video-input-hdmi","domain":"script","service":"turn_on","entity":"script.garage_monitor_input_hdmi","matchType":"source","match":"HDMI"}'
+  garage_monitor_slot_1:
+    name: Garage Monitor Slot 1
+    max: 255
+    initial: '{"label":"DisplayPort","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_input_displayport","matchType":"source","match":"DisplayPort"}'
+  garage_monitor_slot_2:
+    name: Garage Monitor Slot 2
+    max: 255
+    initial: '{"label":"Multi View","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_multiview","matchType":"source","match":"Multi View"}'
+  garage_monitor_slot_3:
+    name: Garage Monitor Slot 3
+    max: 255
+    initial: '{"label":"Power On","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_power_on","matchType":"state","match":"on"}'
+  garage_monitor_slot_4:
+    name: Garage Monitor Slot 4
+    max: 255
+    initial: '{"label":"Power Off","icon":"mdi:monitor-off","domain":"script","service":"turn_on","entity":"script.garage_monitor_power_off","matchType":"state","match":"off"}'
+  garage_monitor_slot_5:
+    name: Garage Monitor Slot 5
+    max: 255
+    initial: '{"label":"Refresh","icon":"mdi:refresh","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  garage_monitor_slot_6:
+    name: Garage Monitor Slot 6
+    max: 255
+    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  garage_monitor_slot_7:
+    name: Garage Monitor Slot 7
+    max: 255
+    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  garage_monitor_slot_8:
+    name: Garage Monitor Slot 8
+    max: 255
+    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  garage_monitor_slot_9:
+    name: Garage Monitor Slot 9
+    max: 255
+    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  garage_monitor_slot_10:
+    name: Garage Monitor Slot 10
+    max: 255
+    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  garage_monitor_slot_11:
+    name: Garage Monitor Slot 11
+    max: 255
+    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+  # Layout config for the M5Paper hotkey pad: {"orientation":"landscape"|
+  # "portrait","cols":N,"rows":M}. cols*rows must be <= 12 (the size of the
+  # slot_0..slot_11 pool above) - slots beyond cols*rows are provisioned but
+  # unused. Edited via the same "Garage Monitor Hotkey Layout" card.
+  garage_monitor_layout_config:
+    name: Garage Monitor Layout Config
+    max: 255
+    initial: '{"orientation":"landscape","cols":3,"rows":2}'
+
+script:
+  garage_monitor_power_on:
+    alias: Garage Monitor - Power On
+    icon: mdi:monitor
+    sequence:
+      - condition: state
+        entity_id: media_player.garage_garage_monitor_ls49cg954snxza
+        state: "off"
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_ls49cg954snxza
+        data:
+          command: KEY_POWER
+    mode: single
+
+  garage_monitor_power_off:
+    alias: Garage Monitor - Power Off
+    icon: mdi:monitor-off
+    sequence:
+      - action: media_player.turn_off
+        target:
+          entity_id: media_player.garage_garage_monitor_ls49cg954snxza
+    mode: single
+
+  garage_monitor_input_hdmi:
+    alias: Garage Monitor - Switch to HDMI
+    icon: mdi:video-input-hdmi
+    sequence:
+      - if:
+          - condition: state
+            entity_id: media_player.garage_garage_monitor_ls49cg954snxza
+            state: "off"
+        then:
+          - action: remote.send_command
+            target:
+              entity_id: remote.garage_garage_monitor_ls49cg954snxza
+            data:
+              command: KEY_POWER
+          - delay:
+              seconds: 8
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_ls49cg954snxza
+        data:
+          command:
+            - KEY_SOURCE
+            - KEY_UP
+            - KEY_UP
+            - KEY_UP
+            - KEY_DOWN
+            - KEY_ENTER
+          delay_secs: 1.5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.garage_monitor_source
+        data:
+          option: HDMI
+    mode: single
+
+  garage_monitor_input_displayport:
+    alias: Garage Monitor - Switch to DisplayPort
+    icon: mdi:laptop
+    sequence:
+      - if:
+          - condition: state
+            entity_id: media_player.garage_garage_monitor_ls49cg954snxza
+            state: "off"
+        then:
+          - action: remote.send_command
+            target:
+              entity_id: remote.garage_garage_monitor_ls49cg954snxza
+            data:
+              command: KEY_POWER
+          - delay:
+              seconds: 8
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_ls49cg954snxza
+        data:
+          command:
+            - KEY_SOURCE
+            - KEY_UP
+            - KEY_UP
+            - KEY_UP
+            - KEY_DOWN
+            - KEY_DOWN
+            - KEY_ENTER
+          delay_secs: 1.5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.garage_monitor_source
+        data:
+          option: DisplayPort
+    mode: single
+
+  garage_monitor_multiview:
+    alias: Garage Monitor - Multi View (HDMI + DisplayPort)
+    icon: mdi:view-split-vertical
+    sequence:
+      - if:
+          - condition: state
+            entity_id: media_player.garage_garage_monitor_ls49cg954snxza
+            state: "off"
+        then:
+          - action: remote.send_command
+            target:
+              entity_id: remote.garage_garage_monitor_ls49cg954snxza
+            data:
+              command: KEY_POWER
+          - delay:
+              seconds: 8
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_ls49cg954snxza
+        data:
+          command:
+            - KEY_HOME
+            - KEY_LEFT
+            - KEY_DOWN
+            - KEY_DOWN
+            - KEY_ENTER
+            - KEY_ENTER
+            - KEY_ENTER
+          delay_secs: 1.5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.garage_monitor_source
+        data:
+          option: Multi View
+    mode: single

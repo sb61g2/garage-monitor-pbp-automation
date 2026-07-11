@@ -53,7 +53,7 @@ const int MAX_SLOTS = 12;
 const uint64_t TIMER_WAKE_INTERVAL_US = 180ULL * 1000000ULL; // background sync every 3 min
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "3";
+const char* FIRMWARE_VERSION = "4";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -77,6 +77,7 @@ int g_activeCount = 6;
 String g_orientation = "landscape";
 int g_cols = 3;
 int g_rows = 2;
+int g_fontSize = 2; // M5GFX setTextSize() multiplier for button labels, 1-4
 String g_layoutRaw = "";
 
 String g_state = "";
@@ -191,6 +192,9 @@ bool refreshLayoutAndSlots() {
       g_orientation = String((const char*)(doc["orientation"] | "landscape"));
       g_cols = doc["cols"] | 3;
       g_rows = doc["rows"] | 2;
+      g_fontSize = doc["fontSize"] | 2;
+      if (g_fontSize < 1) g_fontSize = 1;
+      if (g_fontSize > 4) g_fontSize = 4;
     }
     changed = true;
   }
@@ -272,7 +276,7 @@ void drawSlot(const Slot &s, bool active) {
   d.fillRoundRect(s.x, s.y, s.w, s.h, 10, fill);
   d.drawRoundRect(s.x, s.y, s.w, s.h, 10, COL_BLACK);
 
-  d.setTextSize(2);
+  d.setTextSize(g_fontSize);
   String label = s.label.length() ? s.label : "(empty)";
 
   bool roomForIcon = (s.h >= ICON_SIZE + 30);

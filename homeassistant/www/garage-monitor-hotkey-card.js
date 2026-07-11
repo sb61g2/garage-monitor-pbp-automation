@@ -24,7 +24,7 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this._config = config || {};
     this._slots = new Array(MAX_SLOTS).fill(null);
     this._raw = new Array(MAX_SLOTS).fill("");
-    this._layout = { orientation: "landscape", cols: 3, rows: 2 };
+    this._layout = { orientation: "landscape", cols: 3, rows: 2, fontSize: 2 };
     this._layoutRaw = "";
     this._editingSlot = null;
     this._dragSrc = null;
@@ -94,6 +94,8 @@ class GarageMonitorHotkeyCard extends HTMLElement {
           .gm-wrap { padding: 16px; }
           .gm-grid { display: grid; gap: 10px; margin-top: 8px; }
           .gm-tile {
+            min-width: 0;
+            box-sizing: border-box;
             border: 1px solid var(--divider-color, #ccc);
             border-radius: 8px;
             padding: 12px;
@@ -102,10 +104,16 @@ class GarageMonitorHotkeyCard extends HTMLElement {
             background: var(--card-background-color, #fff);
             color: var(--primary-text-color, #000);
             user-select: none;
+            overflow: hidden;
           }
           .gm-tile.dragover { border-color: var(--primary-color, #03a9f4); border-width: 2px; }
           .gm-tile .gm-icon { font-size: var(--gm-icon-px, 28px); --mdc-icon-size: var(--gm-icon-px, 28px); max-width: 100%; }
-          .gm-tile .gm-label { margin-top: 6px; font-size: 13px; min-height: 16px; }
+          .gm-tile .gm-label {
+            margin-top: 6px;
+            font-size: var(--gm-label-px, 13px);
+            min-height: 16px;
+            overflow-wrap: break-word;
+          }
           .gm-edit { margin-top: 16px; border-top: 1px solid var(--divider-color, #ccc); padding-top: 12px; display: none; }
           .gm-edit.open { display: block; }
           .gm-row { display: flex; align-items: center; margin-bottom: 8px; gap: 8px; }
@@ -152,6 +160,14 @@ class GarageMonitorHotkeyCard extends HTMLElement {
           </div>
           <div class="gm-row"><label>Columns</label><input class="gm-f-cols" type="number" min="1" max="4"></div>
           <div class="gm-row"><label>Rows</label><input class="gm-f-rows" type="number" min="1" max="4"></div>
+          <div class="gm-row"><label>Font Size</label>
+            <select class="gm-f-fontsize">
+              <option value="1">Small</option>
+              <option value="2">Medium</option>
+              <option value="3">Large</option>
+              <option value="4">Extra Large</option>
+            </select>
+          </div>
 
           <div class="gm-section-label">Buttons</div>
           <div class="gm-grid"></div>
@@ -196,12 +212,14 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this.querySelector(".gm-f-orientation").addEventListener("change", () => this._saveLayout());
     this.querySelector(".gm-f-cols").addEventListener("change", () => this._saveLayout());
     this.querySelector(".gm-f-rows").addEventListener("change", () => this._saveLayout());
+    this.querySelector(".gm-f-fontsize").addEventListener("change", () => this._saveLayout());
   }
 
   _syncLayoutForm() {
     this.querySelector(".gm-f-orientation").value = this._layout.orientation || "landscape";
     this.querySelector(".gm-f-cols").value = this._layout.cols || 3;
     this.querySelector(".gm-f-rows").value = this._layout.rows || 2;
+    this.querySelector(".gm-f-fontsize").value = this._layout.fontSize || 2;
   }
 
   _saveLayout() {
@@ -215,7 +233,8 @@ class GarageMonitorHotkeyCard extends HTMLElement {
       return;
     }
     const orientation = this.querySelector(".gm-f-orientation").value;
-    this._layout = { orientation, cols, rows };
+    const fontSize = parseInt(this.querySelector(".gm-f-fontsize").value, 10) || 2;
+    this._layout = { orientation, cols, rows, fontSize };
     const value = JSON.stringify(this._layout);
     this._layoutRaw = value;
     this._hass.callService("input_text", "set_value", { entity_id: LAYOUT_ENTITY, value });
@@ -243,9 +262,12 @@ class GarageMonitorHotkeyCard extends HTMLElement {
   _renderGrid() {
     const cols = this._layout.cols || 3;
     const count = this._activeCount();
-    this._gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    this._gridEl.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
     const iconPx = Math.max(16, Math.min(36, Math.floor(200 / cols)));
     this._gridEl.style.setProperty("--gm-icon-px", `${iconPx}px`);
+    const labelPxByFontSize = { 1: 11, 2: 13, 3: 16, 4: 19 };
+    const labelPx = labelPxByFontSize[this._layout.fontSize] || 13;
+    this._gridEl.style.setProperty("--gm-label-px", `${labelPx}px`);
     this._gridEl.innerHTML = "";
     for (let i = 0; i < count; i++) {
       const s = this._slots[i] || this._defaultSlot();

@@ -19,6 +19,24 @@
 const MAX_SLOTS = 12;
 const LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 
+// Must match the curated bitmap set actually baked into the firmware
+// (m5paper-hotkey/icons.h) - anything outside this list silently falls
+// back to text-only on the physical device, so the picker is constrained
+// to exactly what's supported rather than being free text. Regenerate
+// this list (grep icons.h for "mdi:...") if the icon set changes.
+const AVAILABLE_ICONS = [
+  "mdi:air-conditioner", "mdi:bell", "mdi:bell-off", "mdi:camera", "mdi:camera-off",
+  "mdi:door", "mdi:door-open", "mdi:fan", "mdi:fan-off", "mdi:fire",
+  "mdi:garage", "mdi:garage-open", "mdi:gesture-tap-button", "mdi:help-circle-outline",
+  "mdi:home", "mdi:home-outline", "mdi:laptop", "mdi:lightbulb", "mdi:lightbulb-off",
+  "mdi:lock", "mdi:lock-open", "mdi:monitor", "mdi:monitor-off", "mdi:pause", "mdi:play",
+  "mdi:power", "mdi:power-plug", "mdi:power-plug-off", "mdi:refresh", "mdi:robot-vacuum",
+  "mdi:speaker", "mdi:speaker-off", "mdi:stop", "mdi:television", "mdi:television-off",
+  "mdi:thermostat", "mdi:toggle-switch", "mdi:toggle-switch-off", "mdi:video-input-hdmi",
+  "mdi:view-split-vertical", "mdi:volume-high", "mdi:volume-mute", "mdi:volume-off",
+  "mdi:water", "mdi:water-boiler", "mdi:weather-night", "mdi:white-balance-sunny",
+];
+
 class GarageMonitorHotkeyCard extends HTMLElement {
   setConfig(config) {
     this._config = config || {};
@@ -183,7 +201,7 @@ class GarageMonitorHotkeyCard extends HTMLElement {
 
           <div class="gm-edit">
             <div class="gm-row"><label>Label</label><input class="gm-f-label" type="text"></div>
-            <div class="gm-row"><label>Icon</label><input class="gm-f-icon" type="text" placeholder="mdi:xxx"><span class="gm-icon-preview"></span></div>
+            <div class="gm-row"><label>Icon</label><select class="gm-f-icon"></select><span class="gm-icon-preview"></span></div>
 
             <div class="gm-section-label">Action (Leave Domain Empty for a Refresh-Only Button)</div>
             <div class="gm-row"><label>Domain</label><select class="gm-f-domain"></select></div>
@@ -212,7 +230,8 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this._editEl = this.querySelector(".gm-edit");
     this.querySelector(".gm-cancel").addEventListener("click", () => this._closeEdit());
     this.querySelector(".gm-save").addEventListener("click", () => this._saveEdit());
-    this.querySelector(".gm-f-icon").addEventListener("input", () => this._updateIconPreview());
+    this._populateIconOptions();
+    this.querySelector(".gm-f-icon").addEventListener("change", () => this._updateIconPreview());
     this.querySelector(".gm-f-domain").addEventListener("change", (e) => {
       const domain = e.target.value;
       this._populateEntityOptions(domain, "");
@@ -277,6 +296,17 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     preview.innerHTML = "";
     const val = this.querySelector(".gm-f-icon").value.trim();
     if (val) preview.appendChild(this._iconEl(val));
+  }
+
+  _populateIconOptions() {
+    const sel = this.querySelector(".gm-f-icon");
+    sel.innerHTML = "";
+    for (const icon of AVAILABLE_ICONS) {
+      const opt = document.createElement("option");
+      opt.value = icon;
+      opt.textContent = icon.replace("mdi:", "");
+      sel.appendChild(opt);
+    }
   }
 
   _renderGrid() {

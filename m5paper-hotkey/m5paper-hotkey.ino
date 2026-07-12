@@ -6,11 +6,19 @@
 // input_text.garage_monitor_slot_0..11 (one per grid cell), all edited via
 // the "Garage Monitor Hotkey Layout" card on the HA dashboard.
 //
+// Commands only, no state tracking: buttons fire an action and give a
+// momentary "pressed" indication - there's no "currently active" highlight
+// concept (the matchType/match comparison that used to drive one, and the
+// media_player/input_select state polling it depended on, were removed as
+// unnecessary overhead - the highlight round-trip was adding real latency
+// for a feature that wasn't worth the wait).
+//
 // E-ink refresh is full-quality only (epd_quality) on every redraw - no
-// partial refresh - to avoid ghosting, per explicit preference. Icons are
-// drawn from a curated set of pre-rasterized MDI bitmaps (icons.h) with a
-// text-only fallback for anything not in that set - MDI has ~7000 icons,
-// bundling/rendering all of them live isn't reasonable on this hardware.
+// partial/fast refresh for the main grid - to avoid ghosting, per explicit
+// preference. Icons are drawn from a curated set of pre-rasterized MDI
+// bitmaps (icons.h) with a text-only fallback for anything not in that set
+// - MDI has ~7000 icons, bundling/rendering all of them live isn't
+// reasonable on this hardware.
 //
 // Power: uses light sleep (not deep sleep) between actions. The GT911
 // touch controller's INT line is GPIO48, which is outside the ESP32-S3's
@@ -20,11 +28,20 @@
 // RAM/peripheral state (no full re-init needed on wake), at the cost of
 // less dramatic power savings than deep sleep would have given.
 //
-// OTA: HTTP-pull self-update (HTTPUpdate) checked once per timer wake.
-// Compares FIRMWARE_VERSION against a small version.txt hosted on the HA
-// Pi's www folder; downloads and flashes the .bin on a mismatch. Not
-// push-based ArduinoOTA, since a device that's mostly asleep can't be
-// continuously listening for a push.
+// WiFi is not used at all in normal operation - BLE (see below) is the
+// primary and only path for a successful tap. WiFi only spins up lazily,
+// on-demand, if BLE fails and the HTTP fallback actually runs, or on the
+// periodic timer wake for layout/slot config sync and OTA checks. It is
+// deliberately NOT connected at boot - boot draws whatever's already in
+// memory (blank on a cold power-on) rather than spend several seconds
+// connecting before the pad is usable. Real config populates on the first
+// timer wake (or the first fallback-triggering tap) after power-on.
+//
+// OTA: HTTP-pull self-update (HTTPUpdate), checked once per timer wake (not
+// at boot). Compares FIRMWARE_VERSION against a small version.txt hosted on
+// the HA Pi's www folder; downloads and flashes the .bin on a mismatch. Not
+// push-based ArduinoOTA, since a device that's mostly asleep (and mostly
+// off WiFi entirely now) can't be continuously listening for a push.
 
 #include <M5Unified.h>
 #include <WiFi.h>
@@ -33,29 +50,37 @@
 #include <ArduinoJson.h>
 #include <esp_sleep.h>
 #include <driver/gpio.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include "icons.h"
 #include "secrets.h" // WIFI_SSID, WIFI_PASSWORD, HA_TOKEN - copy secrets.h.example, gitignored
 
 // ---- Config ----
 const char* HA_HOST = "192.168.7.1";
 const uint16_t HA_PORT = 8123;
-const char* MEDIA_PLAYER = "media_player.garage_garage_monitor_ls49cg954snxza";
-// The samsungtv integration never reports a current-source attribute on the
-// media_player entity (confirmed 2026-07-11 - only a static source_list),
-// so the actual displayed input can't be read back from HA directly. This
-// input_select is self-tracked instead: each input-changing HA script sets
-// it as its last step, so it reflects anything done via HA/this pad, but
-// not changes made through other means (e.g. the physical remote).
-const char* SOURCE_ENTITY = "input_select.garage_monitor_source";
 const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 
 const int MAX_SLOTS = 12;
-const uint64_t TIMER_WAKE_INTERVAL_US = 180ULL * 1000000ULL; // background sync every 3 min
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "6";
+const char* FIRMWARE_VERSION = "11";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
+
+// BLE control path (see [[ble-hotkey-plan]]) - button presses go over this
+// instead of the WiFi/HTTP path in ensureWiFi() et al, which stays as the
+// automatic fallback (tryBleInteraction() returning false). USE_BLE is an
+// OTA-deployable kill switch: flip to 0 and push a build if BLE ever
+// destabilizes the "Garage BLE Proxy" ESP32 that routes it to HA, without
+// needing a USB re-flash.
+#define USE_BLE 1
+#define BLE_SERVICE_UUID          "5b1e0000-0000-1000-8000-00805f9b0001"
+#define BLE_CHAR_BUTTON_UUID      "5b1e0001-0000-1000-8000-00805f9b0001"
+#define BLE_CHAR_CONFIGDIRTY_UUID "5b1e0003-0000-1000-8000-00805f9b0001"
+#define BLE_CHAR_DEVICEINFO_UUID  "5b1e0004-0000-1000-8000-00805f9b0001"
+#define BLE_SLOT_SENTINEL_REFRESH 0xFE // Button Event value meaning "header refresh button", not a grid slot
 
 uint32_t COL_BLACK;
 uint32_t COL_WHITE;
@@ -66,8 +91,6 @@ struct Slot {
   String domain;    // "" => refresh-only, no HA service call
   String service;
   String entity;
-  String matchType; // "source" | "state" | "none"
-  String matchValue;
   int16_t x, y, w, h;
 };
 
@@ -82,8 +105,18 @@ String g_headerText = "Garage Monitor";
 int g_headerFontSize = 2;
 String g_layoutRaw = "";
 
-String g_state = "";
-String g_source = "";
+BLEServer* g_bleServer = nullptr;
+BLECharacteristic* g_buttonEventChar = nullptr;
+BLECharacteristic* g_configDirtyChar = nullptr;
+BLECharacteristic* g_deviceInfoChar = nullptr;
+bool g_bleReady = false;             // bleSetup() has run
+volatile bool g_bleConnected = false;
+// See drawSleepBadge() - the first fast/DU-mode partial update of a boot
+// renders incorrectly; only becomes safe once a real quality-mode drawUI()
+// has actually run.
+bool g_sleepBadgeFastModeProven = false;
+volatile bool g_bleSubscribed = false; // central has completed start_notify() - safe to notify() now
+volatile bool g_bleAdvertising = false;
 
 void applyOrientation() {
   // Empirically: rotation(0) is native/portrait on this panel, rotation(1)
@@ -94,6 +127,12 @@ void applyOrientation() {
 
 const int HEADER_H = 60; // fixed/compact, was height*0.16 (86px landscape, 154px portrait)
 int16_t g_refreshBtnX, g_refreshBtnY, g_refreshBtnW, g_refreshBtnH;
+
+// Fixed position in the header, mirroring the refresh button on the
+// opposite side - never overlaps header text (which starts to the right
+// of it, see drawUIOnce()) regardless of header text length/font size.
+const int16_t SLEEP_BADGE_X = 8;
+const int16_t SLEEP_BADGE_Y = 6;
 
 void layoutSlots() {
   applyOrientation();
@@ -166,14 +205,6 @@ bool haGetEntityState(const String &entityId, String &stateOut) {
   return ok;
 }
 
-bool haGetState(String &stateOut, String &sourceOut) {
-  bool ok1 = haGetEntityState(MEDIA_PLAYER, stateOut);
-  String src;
-  bool ok2 = haGetEntityState(SOURCE_ENTITY, src);
-  if (ok2) sourceOut = src;
-  return ok1;
-}
-
 void parseSlotJson(int i, const String &raw) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, raw);
@@ -183,8 +214,6 @@ void parseSlotJson(int i, const String &raw) {
   g_slots[i].domain = String((const char*)(doc["domain"] | ""));
   g_slots[i].service = String((const char*)(doc["service"] | ""));
   g_slots[i].entity = String((const char*)(doc["entity"] | ""));
-  g_slots[i].matchType = String((const char*)(doc["matchType"] | "none"));
-  g_slots[i].matchValue = String((const char*)(doc["match"] | ""));
 }
 
 // Fetches layout config + all active slots. Returns true if anything
@@ -269,6 +298,138 @@ void checkOTA() {
   }
 }
 
+// ---- BLE control path ----
+// GATT server (pad is peripheral) reached through the "Garage BLE Proxy"
+// ESP32's active bluetooth_proxy - see homeassistant/custom_components/
+// garage_hotkey_ble/ for the HA-side coordinator this talks to. Advertising
+// is only ever on for the duration of a single tap's round-trip (started in
+// tryBleInteraction(), stopped in bleTeardown()), never held open through
+// light sleep - this keeps the pad's footprint on the proxy's shared
+// connection budget minimal instead of constant.
+
+class HotkeyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* server) override {
+    g_bleConnected = true;
+    Serial.println("[ble] connected");
+  }
+  void onDisconnect(BLEServer* server) override {
+    g_bleConnected = false;
+    g_bleSubscribed = false;
+    Serial.println("[ble] disconnect");
+  }
+};
+
+// Notifying immediately on connect races the central's own subscription
+// (start_notify() requires its own round-trip GATT write to the CCCD
+// descriptor) - a notify sent before that completes is silently dropped,
+// with no error on either side. Confirmed this actually happened. Waiting
+// for this explicit subscribe confirmation instead of firing blind on
+// connect is the correct fix.
+class ButtonEventCallbacks : public BLECharacteristicCallbacks {
+  void onSubscribe(BLECharacteristic* c, ble_gap_conn_desc* desc, uint16_t subValue) override {
+    if (subValue > 0) {
+      g_bleSubscribed = true;
+    }
+  }
+};
+
+void bleSetup() {
+  BLEDevice::init("GarageHotkeyPad");
+  g_bleServer = BLEDevice::createServer();
+  g_bleServer->setCallbacks(new HotkeyServerCallbacks());
+
+  BLEService* service = g_bleServer->createService(BLE_SERVICE_UUID);
+
+  g_buttonEventChar = service->createCharacteristic(BLE_CHAR_BUTTON_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  g_buttonEventChar->addDescriptor(new BLE2902());
+  g_buttonEventChar->setCallbacks(new ButtonEventCallbacks());
+
+  // Phase-2 stub: accepted but not yet acted on. Config/layout resync still
+  // only happens via the existing timer-wake WiFi poll (refreshLayoutAndSlots())
+  // until this is wired up to trigger an immediate resync.
+  g_configDirtyChar = service->createCharacteristic(BLE_CHAR_CONFIGDIRTY_UUID, BLECharacteristic::PROPERTY_WRITE);
+
+  g_deviceInfoChar = service->createCharacteristic(BLE_CHAR_DEVICEINFO_UUID, BLECharacteristic::PROPERTY_READ);
+  g_deviceInfoChar->setValue(FIRMWARE_VERSION);
+
+  service->start();
+
+  // addServiceUUID() unconditionally push_back()s into a vector with no
+  // dedup (confirmed in the library source) - calling it from
+  // bleStartAdvertising() on every single tap silently duplicated the UUID
+  // on each call. A 128-bit UUID is 16 bytes; two copies alone (32 bytes)
+  // already exceed BLE's 31-byte legacy advertising payload limit, before
+  // flags/name are even counted. Net effect: the first tap after boot
+  // worked, and every tap after that had a corrupted/oversized advertising
+  // payload - undiscoverable, indistinguishable from "the proxy failed".
+  // Set the advertised UUID once here; bleStartAdvertising() only
+  // starts/stops from then on.
+  BLEDevice::getAdvertising()->addServiceUUID(BLE_SERVICE_UUID);
+
+  g_bleReady = true;
+  Serial.println("[ble] setup complete");
+}
+
+bool bleIsAdvertising() {
+  return g_bleAdvertising;
+}
+
+void bleStartAdvertising() {
+  if (!g_bleReady) return;
+  g_bleAdvertising = true;
+  BLEDevice::getAdvertising()->start();
+  Serial.println("[ble] advertising start");
+}
+
+void bleTeardown() {
+  if (!g_bleReady) return;
+  if (g_bleAdvertising) {
+    BLEDevice::getAdvertising()->stop();
+    g_bleAdvertising = false;
+  }
+  if (g_bleConnected && g_bleServer) {
+    g_bleServer->disconnect(g_bleServer->getConnId());
+  }
+  g_bleConnected = false;
+  Serial.println("[ble] teardown");
+}
+
+// Bounded wait for a central (routed through the proxy) to connect AND
+// finish subscribing to notifications, then notifies the button event.
+// Waiting for the subscribe confirmation (not just the connection) avoids
+// racing the central's own start_notify() - see ButtonEventCallbacks.
+// Returns false on timeout - the caller falls back to the WiFi/HTTP path.
+bool bleNotifyButtonPress(uint8_t slotIndexOrSentinel, uint32_t connectTimeoutMs) {
+  unsigned long start = millis();
+  while (!g_bleSubscribed && millis() - start < connectTimeoutMs) {
+    if (!g_bleAdvertising && !g_bleConnected) break; // torn down elsewhere
+    delay(50);
+  }
+  if (!g_bleSubscribed) return false;
+  uint8_t payload = slotIndexOrSentinel;
+  g_buttonEventChar->setValue(&payload, 1);
+  g_buttonEventChar->notify();
+  Serial.printf("[ble] notify slot=%d\n", slotIndexOrSentinel);
+  return true;
+}
+
+// Single entry point for a tap: advertise -> connect -> subscribe -> notify,
+// then done. Fire-and-forget - no waiting for any response from HA, since
+// there's nothing left to wait for once the notify is sent (no highlight
+// mask, no ack). Returns true if the notify was sent, false on timeout (the
+// caller falls back to the WiFi/HTTP path). BLE is always torn down here
+// before returning, so the caller's redraw never races an active connection.
+bool tryBleInteraction(uint8_t slotIndexOrSentinel) {
+#if USE_BLE
+  bleStartAdvertising();
+  bool ok = bleNotifyButtonPress(slotIndexOrSentinel, 4000);
+  bleTeardown();
+  return ok;
+#else
+  return false;
+#endif
+}
+
 const uint8_t* findIcon(const String &name) {
   for (int i = 0; i < ICON_TABLE_SIZE; i++) {
     if (name.equalsIgnoreCase(ICON_TABLE[i].name)) return ICON_TABLE[i].data;
@@ -276,16 +437,13 @@ const uint8_t* findIcon(const String &name) {
   return nullptr;
 }
 
-bool slotIsActive(const Slot &s) {
-  if (s.matchType == "source") return g_source.length() && g_source == s.matchValue;
-  if (s.matchType == "state") return g_state.length() && g_state == s.matchValue;
-  return false;
-}
-
-void drawSlot(const Slot &s, bool active) {
+// pressed=true is only ever used for the momentary flashPressedFeedback()
+// pulse below - the persistent grid (drawUIOnce()) always renders neutral,
+// no "currently active" concept at all.
+void drawSlot(const Slot &s, bool pressed) {
   auto &d = M5.Display;
-  uint32_t fill = active ? COL_BLACK : COL_WHITE;
-  uint32_t text = active ? COL_WHITE : COL_BLACK;
+  uint32_t fill = pressed ? COL_BLACK : COL_WHITE;
+  uint32_t text = pressed ? COL_WHITE : COL_BLACK;
   d.fillRoundRect(s.x, s.y, s.w, s.h, 10, fill);
   d.drawRoundRect(s.x, s.y, s.w, s.h, 10, COL_BLACK);
 
@@ -340,7 +498,7 @@ void drawUIOnce() {
   d.setTextColor(COL_BLACK, COL_WHITE);
   d.setTextDatum(middle_left);
   d.setTextSize(g_headerFontSize);
-  d.drawString(g_headerText, 16, HEADER_H / 2);
+  d.drawString(g_headerText, SLEEP_BADGE_X + ICON_SIZE + 16, HEADER_H / 2);
 
   const uint8_t* refreshIcon = findIcon("mdi:refresh");
   if (refreshIcon) {
@@ -348,7 +506,7 @@ void drawUIOnce() {
   }
 
   for (int i = 0; i < g_activeCount; i++) {
-    drawSlot(g_slots[i], slotIsActive(g_slots[i]));
+    drawSlot(g_slots[i], false); // always neutral - no persistent "active" state
   }
 
   Serial.printf("[drawUI] before display() free_heap=%u\n", ESP.getFreeHeap());
@@ -360,6 +518,15 @@ void drawUI() {
   bool wifiWasOn = (WiFi.status() == WL_CONNECTED);
   if (wifiWasOn) {
     WiFi.mode(WIFI_OFF);
+    delay(300);
+  }
+  // BLE and WiFi share the same 2.4GHz RF front end on the ESP32-S3, so
+  // treat active BLE the same way as WiFi above: fully quiet before the
+  // e-paper refresh. Unlike the WiFi mitigation (lines above, confirmed via
+  // photo evidence), this hasn't been independently verified against BLE -
+  // treated as the same class of risk by default pending its own check.
+  if (g_bleConnected || bleIsAdvertising()) {
+    bleTeardown();
     delay(300);
   }
   // Drawing content twice back-to-back was tried and made things worse: if
@@ -380,31 +547,65 @@ void drawUI() {
   delay(800);
 }
 
-void showBootMessage(const char* msg) {
+// Genuinely momentary "command received" feedback - a brief epd_fast pulse
+// of just the tapped tile (fast mode is fine here specifically because it's
+// immediately followed by a full epd_quality drawUI() that repaints
+// everything anyway, so any fast-mode imprecision never persists). Always
+// called after BLE teardown or with the WiFi call already complete, so it
+// never races an active radio connection, matching every other display()
+// call in this sketch. Not a state to track - the very next drawUI() call
+// (always neutral, see drawUIOnce()) is what actually settles the screen.
+void flashPressedFeedback(const Slot &s) {
   auto &d = M5.Display;
   d.setEpdMode(epd_mode_t::epd_fast);
-  d.fillScreen(COL_WHITE);
-  d.setTextColor(COL_BLACK, COL_WHITE);
-  d.setTextDatum(middle_center);
-  d.setTextSize(2);
-  d.drawString(msg, d.width() / 2, d.height() / 2);
+  drawSlot(s, true);
   d.display();
 }
 
-void connectWiFi() {
-  showBootMessage("Connecting to WiFi...");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    delay(250);
+// Small fixed-position "asleep" marker, the only visual difference between
+// "pad is actually asleep, this tap both wakes it and fires the command"
+// and "pad is already awake" - e-paper otherwise holds whatever was drawn
+// last, so without this there's no way to tell the two states apart.
+// Uses display(x, y, w, h) - a real windowed update scoped to just this
+// icon (see Panel_EPDiy::display(), which only refreshes the accumulated
+// modified-region rect, not the whole panel) - rather than the bare
+// display() used everywhere else in this file, so showing/hiding it is a
+// small partial refresh instead of the ~1.6s full-panel dance.
+// Always called before any radio activity starts in the same code path
+// (right before entering light sleep, or as the very first thing on a
+// touch wake, ahead of the BLE/WiFi call) so it never races the WiFi-
+// interference corruption issue documented on drawUI().
+void drawSleepBadge(bool visible) {
+  auto &d = M5.Display;
+  // The very first fast/DU-mode partial update of a boot has rendered
+  // wrong (inverted colors, only half the region drawn) every time this
+  // has been tested - even after priming it with an extra throwaway
+  // draw-then-clear pair, which ruled out "just needs repetition" as the
+  // explanation. What's actually reliable: a quality-mode windowed update
+  // (slower, still just this small icon rather than the whole panel, but
+  // correct). So the first-ever call this boot always uses quality mode;
+  // every call after that uses fast mode.
+  d.setEpdMode(g_sleepBadgeFastModeProven ? epd_mode_t::epd_fast : epd_mode_t::epd_quality);
+  d.fillRect(SLEEP_BADGE_X, SLEEP_BADGE_Y, ICON_SIZE, ICON_SIZE, COL_WHITE);
+  if (visible) {
+    const uint8_t* moonIcon = findIcon("mdi:weather-night");
+    if (moonIcon) {
+      d.drawBitmap(SLEEP_BADGE_X, SLEEP_BADGE_Y, moonIcon, ICON_SIZE, ICON_SIZE, COL_BLACK, COL_WHITE);
+    }
   }
+  d.display(SLEEP_BADGE_X, SLEEP_BADGE_Y, ICON_SIZE, ICON_SIZE);
+  g_sleepBadgeFastModeProven = true;
 }
 
+// GPIO-only wake, no periodic timer wake - this pad is a "dumb" remote
+// with no background WiFi/BLE activity at all outside of an actual tap or
+// the manual header refresh button, so there's nothing for a periodic wake
+// to do. Removing it means the device sleeps indefinitely until touched,
+// which is the real battery win (each wake/sleep cycle has its own
+// overhead even when it does nothing).
 void enterLightSleepAndWait() {
   gpio_wakeup_enable(TOUCH_INT_PIN, GPIO_INTR_LOW_LEVEL);
   esp_sleep_enable_gpio_wakeup();
-  esp_sleep_enable_timer_wakeup(TIMER_WAKE_INTERVAL_US);
   esp_light_sleep_start();
 }
 
@@ -418,17 +619,22 @@ void setup() {
   COL_BLACK = M5.Display.color888(0, 0, 0);
   COL_WHITE = M5.Display.color888(255, 255, 255);
 
-  connectWiFi();
+#if USE_BLE
+  bleSetup();
+#endif
 
-  if (WiFi.status() == WL_CONNECTED) {
-    haGetState(g_state, g_source);
-    refreshLayoutAndSlots();
-    checkOTA();
-  } else {
-    g_state = "wifi-fail";
-    layoutSlots();
-  }
+  // layoutSlots() lays out whatever's currently in g_slots (all blank on a
+  // cold power-on) so the pad has something on screen immediately, then a
+  // one-time WiFi pull fills in the real content right after - the pad has
+  // no other automatic path to get real config now that the periodic
+  // background sync is gone (manual refresh is the only recurring path),
+  // so without this a cold boot would otherwise stay blank until someone
+  // taps the header refresh button.
+  layoutSlots();
   drawUI();
+  if (refreshLayoutAndSlots()) {
+    drawUI();
+  }
 }
 
 void loop() {
@@ -437,27 +643,49 @@ void loop() {
   bool handledTouch = false;
   if (M5.Touch.getCount()) {
     auto t = M5.Touch.getDetail(0);
-    if (t.wasReleased()) {
+    // wasPressed() (down-edge), not wasReleased() (up-edge): the touch that
+    // wakes the device from light sleep is a press, and by the time loop()
+    // resumes and polls here, the finger may still be down - waiting for a
+    // release meant that first wake-triggering touch was frequently missed
+    // entirely (code saw "not released yet", did nothing, went back to
+    // sleep before the finger ever lifted), forcing a second tap to
+    // register anything. Acting on press instead means a single deliberate
+    // tap both wakes the pad and is treated as the command in one motion.
+    if (t.wasPressed()) {
+      // Clear the sleep badge immediately, before any BLE/WiFi call - this
+      // is the fast, near-instant "I'm awake" confirmation, decoupled from
+      // however long the actual command round-trip takes.
+      drawSleepBadge(false);
       if (t.x >= g_refreshBtnX && t.x <= g_refreshBtnX + g_refreshBtnW &&
           t.y >= g_refreshBtnY && t.y <= g_refreshBtnY + g_refreshBtnH) {
         Serial.println("[loop] touch hit header refresh button");
-        haGetState(g_state, g_source);
+        // Refresh is WiFi-only, deliberately, not routed through BLE at
+        // all: it has no mapped HA service call, so a successful BLE round
+        // trip for it would do nothing except redraw the same (possibly
+        // stale) data - the whole point of this button is the WiFi resync
+        // itself. This is also the only place a firmware update check
+        // happens now - no periodic background polling, so "manually
+        // triggered refresh" is the one moment WiFi comes up on its own.
         refreshLayoutAndSlots();
         drawUI();
+        checkOTA();
         handledTouch = true;
       }
       for (int i = 0; !handledTouch && i < g_activeCount; i++) {
         Slot &s = g_slots[i];
         if (t.x >= s.x && t.x <= s.x + s.w && t.y >= s.y && t.y <= s.y + s.h) {
           Serial.printf("[loop] touch hit slot %d ('%s')\n", i, s.label.c_str());
-          if (s.domain.length() && s.service.length() && s.entity.length()) {
-            haCallService(s.domain, s.service, s.entity);
-            delay(1500); // let HA/monitor settle before re-polling state
+          if (!tryBleInteraction((uint8_t)i)) {
+            if (s.domain.length() && s.service.length() && s.entity.length()) {
+              haCallService(s.domain, s.service, s.entity);
+            }
+            refreshLayoutAndSlots();
           }
-          haGetState(g_state, g_source);
-          Serial.printf("[loop] refreshLayoutAndSlots free_heap_before=%u\n", ESP.getFreeHeap());
-          refreshLayoutAndSlots();
-          Serial.printf("[loop] refreshLayoutAndSlots free_heap_after=%u\n", ESP.getFreeHeap());
+          // Confirms the tap was received/handled, regardless of which path
+          // (BLE or WiFi fallback) processed it - not tied to whether the
+          // downstream HA action specifically succeeded. Always followed by
+          // the normal neutral drawUI() below, so it never lingers.
+          flashPressedFeedback(s);
           drawUI();
           handledTouch = true;
           break;
@@ -466,18 +694,6 @@ void loop() {
     }
   }
 
-  if (!handledTouch && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-    String newState, newSource;
-    bool stateChanged = false;
-    if (haGetState(newState, newSource)) {
-      stateChanged = (newState != g_state || newSource != g_source);
-      g_state = newState;
-      g_source = newSource;
-    }
-    bool layoutChanged = refreshLayoutAndSlots();
-    if (stateChanged || layoutChanged) drawUI();
-    checkOTA();
-  }
-
+  drawSleepBadge(true);
   enterLightSleepAndWait();
 }

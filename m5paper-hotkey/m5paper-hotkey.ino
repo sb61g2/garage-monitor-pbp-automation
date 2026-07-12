@@ -53,7 +53,7 @@ const int MAX_SLOTS = 12;
 const uint64_t TIMER_WAKE_INTERVAL_US = 180ULL * 1000000ULL; // background sync every 3 min
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "5";
+const char* FIRMWARE_VERSION = "6";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -78,6 +78,8 @@ String g_orientation = "landscape";
 int g_cols = 3;
 int g_rows = 2;
 int g_fontSize = 2; // M5GFX setTextSize() multiplier for button labels, 1-4
+String g_headerText = "Garage Monitor";
+int g_headerFontSize = 2;
 String g_layoutRaw = "";
 
 String g_state = "";
@@ -202,6 +204,10 @@ bool refreshLayoutAndSlots() {
       g_fontSize = doc["fontSize"] | 2;
       if (g_fontSize < 1) g_fontSize = 1;
       if (g_fontSize > 4) g_fontSize = 4;
+      g_headerText = String((const char*)(doc["headerText"] | "Garage Monitor"));
+      g_headerFontSize = doc["headerFontSize"] | 2;
+      if (g_headerFontSize < 1) g_headerFontSize = 1;
+      if (g_headerFontSize > 4) g_headerFontSize = 4;
     }
     changed = true;
   }
@@ -332,15 +338,9 @@ void drawUIOnce() {
   d.drawFastHLine(0, HEADER_H - 2, W, COL_BLACK);
 
   d.setTextColor(COL_BLACK, COL_WHITE);
-  d.setTextDatum(top_left);
-  d.setTextSize(2);
-  d.setCursor(16, 6);
-  d.print("Garage Monitor");
-
-  d.setCursor(16, 28);
-  String stateStr = g_state.length() ? g_state : "unknown";
-  String srcStr = g_source.length() ? g_source : "-";
-  d.printf("Power: %s   Source: %s", stateStr.c_str(), srcStr.c_str());
+  d.setTextDatum(middle_left);
+  d.setTextSize(g_headerFontSize);
+  d.drawString(g_headerText, 16, HEADER_H / 2);
 
   const uint8_t* refreshIcon = findIcon("mdi:refresh");
   if (refreshIcon) {

@@ -24,7 +24,7 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this._config = config || {};
     this._slots = new Array(MAX_SLOTS).fill(null);
     this._raw = new Array(MAX_SLOTS).fill("");
-    this._layout = { orientation: "landscape", cols: 3, rows: 2, fontSize: 2 };
+    this._layout = { orientation: "landscape", cols: 3, rows: 2, fontSize: 2, headerText: "Garage Monitor", headerFontSize: 2 };
     this._layoutRaw = "";
     this._editingSlot = null;
     this._dragSrc = null;
@@ -168,6 +168,15 @@ class GarageMonitorHotkeyCard extends HTMLElement {
               <option value="4">Extra Large</option>
             </select>
           </div>
+          <div class="gm-row"><label>Header Text</label><input class="gm-f-headertext" type="text" placeholder="Garage Monitor"></div>
+          <div class="gm-row"><label>Header Size</label>
+            <select class="gm-f-headerfontsize">
+              <option value="1">Small</option>
+              <option value="2">Medium</option>
+              <option value="3">Large</option>
+              <option value="4">Extra Large</option>
+            </select>
+          </div>
 
           <div class="gm-section-label">Buttons</div>
           <div class="gm-grid"></div>
@@ -213,6 +222,8 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this.querySelector(".gm-f-cols").addEventListener("change", () => this._saveLayout());
     this.querySelector(".gm-f-rows").addEventListener("change", () => this._saveLayout());
     this.querySelector(".gm-f-fontsize").addEventListener("change", () => this._saveLayout());
+    this.querySelector(".gm-f-headertext").addEventListener("change", () => this._saveLayout());
+    this.querySelector(".gm-f-headerfontsize").addEventListener("change", () => this._saveLayout());
   }
 
   _syncLayoutForm() {
@@ -220,6 +231,8 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this.querySelector(".gm-f-cols").value = this._layout.cols || 3;
     this.querySelector(".gm-f-rows").value = this._layout.rows || 2;
     this.querySelector(".gm-f-fontsize").value = this._layout.fontSize || 2;
+    this.querySelector(".gm-f-headertext").value = this._layout.headerText || "Garage Monitor";
+    this.querySelector(".gm-f-headerfontsize").value = this._layout.headerFontSize || 2;
   }
 
   _saveLayout() {
@@ -234,8 +247,15 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     }
     const orientation = this.querySelector(".gm-f-orientation").value;
     const fontSize = parseInt(this.querySelector(".gm-f-fontsize").value, 10) || 2;
-    this._layout = { orientation, cols, rows, fontSize };
+    const headerText = this.querySelector(".gm-f-headertext").value.trim() || "Garage Monitor";
+    const headerFontSize = parseInt(this.querySelector(".gm-f-headerfontsize").value, 10) || 2;
+    this._layout = { orientation, cols, rows, fontSize, headerText, headerFontSize };
     const value = JSON.stringify(this._layout);
+    if (value.length > 255) {
+      alert(`Layout JSON is ${value.length} chars, over the 255-char input_text limit. Shorten the header text.`);
+      this._syncLayoutForm();
+      return;
+    }
     this._layoutRaw = value;
     this._hass.callService("input_text", "set_value", { entity_id: LAYOUT_ENTITY, value });
     this._renderGrid();

@@ -65,7 +65,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "11";
+const char* FIRMWARE_VERSION = "15";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -100,6 +100,10 @@ int g_activeCount = 6;
 String g_orientation = "landscape";
 int g_cols = 3;
 int g_rows = 2;
+// When true, column 0 of each row is split into two half-height slots
+// (On/Off) instead of one full-height slot - see layoutSlots(). Adds one
+// extra slot per row on top of the normal cols*rows count.
+bool g_splitFirstCol = false;
 int g_fontSize = 2; // M5GFX setTextSize() multiplier for button labels, 1-4
 String g_headerText = "Garage Monitor";
 int g_headerFontSize = 2;
@@ -134,6 +138,25 @@ int16_t g_refreshBtnX, g_refreshBtnY, g_refreshBtnW, g_refreshBtnH;
 const int16_t SLEEP_BADGE_X = 8;
 const int16_t SLEEP_BADGE_Y = 6;
 
+// Narrow gutter reserved on the left of the grid for "UP"/"LO" row labels
+// (see drawUIOnce()) - only when the layout is exactly 2 rows, the one
+// case with an established row meaning (top row = Upper monitor, bottom
+// row = Lower monitor). Kept as small as legibly possible since it comes
+// directly out of every button's width: 24px shrinks a 3-column landscape
+// button by under 3%.
+const int16_t ROW_LABEL_W = 40;
+int16_t g_rowLabelCenterX = 0;
+bool g_showRowLabels = false;
+// Slot index of the first slot in row 1 - g_cols for a plain uniform grid,
+// but shifted by 1 when column 0 is split (row 0 then holds cols+1 slots).
+// Used by drawUIOnce() to find "the start of the bottom row" without
+// hardcoding either layout shape.
+int g_row1FirstSlotIndex = 0;
+// Full (un-split) row height - needed because g_slots[0].h is only half a
+// row's height when column 0 is split, so it can't be used directly to
+// find a row's vertical center or bottom edge.
+int g_rowFullH = 0;
+
 void layoutSlots() {
   applyOrientation();
   int W = M5.Display.width();
@@ -141,17 +164,55 @@ void layoutSlots() {
   int margin = 14;
   int cols = max(1, g_cols);
   int rows = max(1, g_rows);
+  g_showRowLabels = (rows == 2);
+  int gridLeft = margin + (g_showRowLabels ? ROW_LABEL_W : 0);
+  g_rowLabelCenterX = margin + ROW_LABEL_W / 2;
   int gridTop = HEADER_H + margin;
   int gridH = H - gridTop - margin;
-  int cellW = (W - margin * (cols + 1)) / cols;
+  int cellW = (W - gridLeft - margin * cols) / cols;
   int cellH = (gridH - margin * (rows - 1)) / rows;
-  for (int i = 0; i < g_activeCount; i++) {
-    int col = i % cols;
-    int row = i / cols;
-    g_slots[i].x = margin + col * (cellW + margin);
-    g_slots[i].y = gridTop + row * (cellH + margin);
-    g_slots[i].w = cellW;
-    g_slots[i].h = cellH;
+  g_rowFullH = cellH;
+
+  if (g_splitFirstCol) {
+    // Column 0 of each row becomes two half-height slots (On/Off) instead
+    // of one full-height slot; columns 1..cols-1 stay full height and
+    // shift right by one slot index per row to make room.
+    int splitGap = 4;
+    int halfH = (cellH - splitGap) / 2;
+    int slotsPerRow = cols + 1;
+    g_row1FirstSlotIndex = slotsPerRow;
+    for (int i = 0; i < g_activeCount; i++) {
+      int row = i / slotsPerRow;
+      int posInRow = i % slotsPerRow;
+      int rowY = gridTop + row * (cellH + margin);
+      if (posInRow == 0) { // On - top half of column 0
+        g_slots[i].x = gridLeft;
+        g_slots[i].y = rowY;
+        g_slots[i].w = cellW;
+        g_slots[i].h = halfH;
+      } else if (posInRow == 1) { // Off - bottom half of column 0
+        g_slots[i].x = gridLeft;
+        g_slots[i].y = rowY + halfH + splitGap;
+        g_slots[i].w = cellW;
+        g_slots[i].h = halfH;
+      } else {
+        int col = posInRow - 1;
+        g_slots[i].x = gridLeft + col * (cellW + margin);
+        g_slots[i].y = rowY;
+        g_slots[i].w = cellW;
+        g_slots[i].h = cellH;
+      }
+    }
+  } else {
+    g_row1FirstSlotIndex = cols;
+    for (int i = 0; i < g_activeCount; i++) {
+      int col = i % cols;
+      int row = i / cols;
+      g_slots[i].x = gridLeft + col * (cellW + margin);
+      g_slots[i].y = gridTop + row * (cellH + margin);
+      g_slots[i].w = cellW;
+      g_slots[i].h = cellH;
+    }
   }
 
   g_refreshBtnW = 48;
@@ -230,6 +291,7 @@ bool refreshLayoutAndSlots() {
       g_orientation = String((const char*)(doc["orientation"] | "landscape"));
       g_cols = doc["cols"] | 3;
       g_rows = doc["rows"] | 2;
+      g_splitFirstCol = doc["splitFirstCol"] | false;
       g_fontSize = doc["fontSize"] | 2;
       if (g_fontSize < 1) g_fontSize = 1;
       if (g_fontSize > 4) g_fontSize = 4;
@@ -241,7 +303,7 @@ bool refreshLayoutAndSlots() {
     changed = true;
   }
 
-  int wantCount = g_cols * g_rows;
+  int wantCount = g_cols * g_rows + (g_splitFirstCol ? g_rows : 0);
   if (wantCount < 1) wantCount = 1;
   if (wantCount > MAX_SLOTS) wantCount = MAX_SLOTS;
   if (wantCount != g_activeCount) {
@@ -466,6 +528,26 @@ void drawSlot(const Slot &s, bool pressed) {
   }
 }
 
+// Draws text upright into a small offscreen sprite, then pushes it rotated
+// 90 degrees so it reads vertically - the standard LovyanGFX technique for
+// rotated text (M5Canvas + pushRotateZoom). 1-bit color depth keeps it hard
+// black/white with no gray fringing from the rotation, matching the sharp
+// look of everything else on this pad. Runs as part of the same
+// epd_quality full-panel refresh already under way in drawUIOnce(), so it
+// needs no display()/settling logic of its own.
+void drawRowLabel(const char* text, int16_t centerX, int16_t centerY) {
+  M5Canvas sprite(&M5.Display);
+  sprite.setColorDepth(1);
+  sprite.createSprite(150, 36); // wide enough for "LOWER" (5 chars) at size 4
+  sprite.fillSprite(COL_WHITE);
+  sprite.setTextColor(COL_BLACK, COL_WHITE);
+  sprite.setTextDatum(middle_center);
+  sprite.setTextSize(4);
+  sprite.drawString(text, 75, 18);
+  sprite.pushRotateZoom(&M5.Display, centerX, centerY, 90, 1.0f, 1.0f);
+  sprite.deleteSprite();
+}
+
 // The physical e-paper refresh triggered by display() is a multi-second,
 // multi-pass, timing-sensitive software-driven waveform sequence (epdiy).
 // Something preempting the CPU mid-refresh (WiFi radio activity is the
@@ -495,9 +577,17 @@ void drawUIOnce() {
   d.drawFastHLine(0, HEADER_H - 1, W, COL_BLACK);
   d.drawFastHLine(0, HEADER_H - 2, W, COL_BLACK);
 
+  // Bold vector font for the header specifically - noticeably bigger/
+  // heavier than the plain bitmap font used everywhere else on the pad.
+  // Reset back to the default font right after so slot labels and row
+  // labels below are unaffected.
+  // g_headerFontSize (a 1-4 multiplier, still configurable from the
+  // Same bitmap font as everything else on the pad (Font0), just a bigger
+  // multiplier than the old g_headerFontSize default - size 5 lands at
+  // roughly the same visual height the bold vector font had.
   d.setTextColor(COL_BLACK, COL_WHITE);
   d.setTextDatum(middle_left);
-  d.setTextSize(g_headerFontSize);
+  d.setTextSize(5);
   d.drawString(g_headerText, SLEEP_BADGE_X + ICON_SIZE + 16, HEADER_H / 2);
 
   const uint8_t* refreshIcon = findIcon("mdi:refresh");
@@ -507,6 +597,24 @@ void drawUIOnce() {
 
   for (int i = 0; i < g_activeCount; i++) {
     drawSlot(g_slots[i], false); // always neutral - no persistent "active" state
+  }
+
+  // Row labels + divider: top row = Upper monitor, bottom row = Lower
+  // monitor (see layoutSlots(), only shown for a 2-row layout). Uses
+  // g_rowFullH (not g_slots[i].h, which is only a half-row when column 0
+  // is split) to find each row's true vertical center/edges.
+  if (g_showRowLabels && g_activeCount > g_row1FirstSlotIndex) {
+    drawRowLabel("UPPER", g_rowLabelCenterX, g_slots[0].y + g_rowFullH / 2);
+    drawRowLabel("LOWER", g_rowLabelCenterX, g_slots[g_row1FirstSlotIndex].y + g_rowFullH / 2);
+
+    // Bold divider centered in the gap between the two rows, matching the
+    // header's own 2-stacked-hline bold-line style but a little thicker
+    // since this one is a deliberate row separator.
+    int gapTop = g_slots[0].y + g_rowFullH;
+    int gapBottom = g_slots[g_row1FirstSlotIndex].y;
+    int lineThickness = 3;
+    int lineY = gapTop + (gapBottom - gapTop - lineThickness) / 2;
+    d.fillRect(0, lineY, W, lineThickness, COL_BLACK);
   }
 
   Serial.printf("[drawUI] before display() free_heap=%u\n", ESP.getFreeHeap());

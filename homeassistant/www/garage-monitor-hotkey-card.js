@@ -15,6 +15,11 @@
 // off hass.states / hass.services, no picker components needed), rather
 // than a flat single "all entities" dropdown, which would be enormous and
 // unusable as a single list.
+//
+// Command-only, no active-state highlighting: buttons fire an action, full
+// stop. The earlier "Highlight When Active" matchType/match feature (and
+// the matching pad-side/BLE-side logic) was removed as unnecessary latency
+// for a feature that wasn't worth the wait.
 
 const MAX_SLOTS = 12;
 const LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
@@ -45,7 +50,7 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this._layout = { orientation: "landscape", cols: 3, rows: 2, fontSize: 2, headerText: "Garage Monitor", headerFontSize: 2 };
     this._layoutRaw = "";
     this._editingSlot = null;
-    this._dragSrc = null;
+    this._mode = "view";
     this._built = false;
   }
 
@@ -67,7 +72,7 @@ class GarageMonitorHotkeyCard extends HTMLElement {
   }
 
   _defaultSlot() {
-    return { label: "", icon: "mdi:help-circle-outline", domain: "", service: "", entity: "", matchType: "none", match: "" };
+    return { label: "", icon: "mdi:help-circle-outline", domain: "", service: "", entity: "" };
   }
 
   _activeCount() {
@@ -107,11 +112,25 @@ class GarageMonitorHotkeyCard extends HTMLElement {
 
   _buildDom() {
     this.innerHTML = `
-      <ha-card header="Paper S3 Layout">
+      <ha-card>
         <style>
           .gm-wrap { padding: 16px; }
+          .gm-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+          .gm-panel-title { font-size: 1.2em; font-weight: 500; color: var(--primary-text-color, #000); overflow-wrap: break-word; }
+          .gm-mode-toggle {
+            flex-shrink: 0;
+            padding: 6px 14px;
+            border-radius: 4px;
+            border: 1px solid var(--divider-color, #ccc);
+            background: var(--card-background-color, #fff);
+            color: var(--primary-color, #03a9f4);
+            cursor: pointer;
+          }
+          .gm-layout-settings { display: none; margin-top: 12px; }
+          .gm-layout-settings.open { display: block; }
           .gm-grid { display: grid; gap: 10px; margin-top: 8px; }
           .gm-tile {
+            position: relative;
             min-width: 0;
             box-sizing: border-box;
             border: 1px solid var(--divider-color, #ccc);
@@ -124,7 +143,26 @@ class GarageMonitorHotkeyCard extends HTMLElement {
             user-select: none;
             overflow: hidden;
           }
-          .gm-tile.dragover { border-color: var(--primary-color, #03a9f4); border-width: 2px; }
+          .gm-tile-controls {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            display: flex;
+            flex-direction: column;
+          }
+          .gm-tile-controls button {
+            width: 22px;
+            height: 18px;
+            line-height: 1;
+            padding: 0;
+            border: none;
+            background: transparent;
+            color: var(--secondary-text-color, #888);
+            cursor: pointer;
+          }
+          .gm-tile-controls button:hover:not(:disabled) { color: var(--primary-color, #03a9f4); }
+          .gm-tile-controls button:disabled { opacity: 0.25; cursor: default; }
+          .gm-tile.gm-inert { cursor: default; }
           .gm-tile .gm-icon { font-size: var(--gm-icon-px, 28px); --mdc-icon-size: var(--gm-icon-px, 28px); max-width: 100%; }
           .gm-tile .gm-label {
             margin-top: 6px;
@@ -169,34 +207,41 @@ class GarageMonitorHotkeyCard extends HTMLElement {
           .gm-section-label { font-size: 12px; font-weight: 600; color: var(--secondary-text-color, #888); margin: 12px 0 4px; }
         </style>
         <div class="gm-wrap">
-          <div class="gm-section-label">Pad Layout</div>
-          <div class="gm-row"><label>Orientation</label>
-            <select class="gm-f-orientation">
-              <option value="landscape">Landscape</option>
-              <option value="portrait">Portrait</option>
-            </select>
-          </div>
-          <div class="gm-row"><label>Columns</label><input class="gm-f-cols" type="number" min="1" max="4"></div>
-          <div class="gm-row"><label>Rows</label><input class="gm-f-rows" type="number" min="1" max="4"></div>
-          <div class="gm-row"><label>Font Size</label>
-            <select class="gm-f-fontsize">
-              <option value="1">Small</option>
-              <option value="2">Medium</option>
-              <option value="3">Large</option>
-              <option value="4">Extra Large</option>
-            </select>
-          </div>
-          <div class="gm-row"><label>Header Text</label><input class="gm-f-headertext" type="text" placeholder="Garage Monitor"></div>
-          <div class="gm-row"><label>Header Size</label>
-            <select class="gm-f-headerfontsize">
-              <option value="1">Small</option>
-              <option value="2">Medium</option>
-              <option value="3">Large</option>
-              <option value="4">Extra Large</option>
-            </select>
+          <div class="gm-panel-header">
+            <div class="gm-panel-title">Garage Monitor</div>
+            <button class="gm-mode-toggle" type="button">Edit Layout</button>
           </div>
 
-          <div class="gm-section-label">Buttons</div>
+          <div class="gm-layout-settings">
+            <div class="gm-section-label">Pad Layout</div>
+            <div class="gm-row"><label>Orientation</label>
+              <select class="gm-f-orientation">
+                <option value="landscape">Landscape</option>
+                <option value="portrait">Portrait</option>
+              </select>
+            </div>
+            <div class="gm-row"><label>Columns</label><input class="gm-f-cols" type="number" min="1" max="4"></div>
+            <div class="gm-row"><label>Rows</label><input class="gm-f-rows" type="number" min="1" max="4"></div>
+            <div class="gm-row"><label>Font Size</label>
+              <select class="gm-f-fontsize">
+                <option value="1">Small</option>
+                <option value="2">Medium</option>
+                <option value="3">Large</option>
+                <option value="4">Extra Large</option>
+              </select>
+            </div>
+            <div class="gm-row"><label>Header Text</label><input class="gm-f-headertext" type="text" placeholder="Garage Monitor"></div>
+            <div class="gm-row"><label>Header Size</label>
+              <select class="gm-f-headerfontsize">
+                <option value="1">Small</option>
+                <option value="2">Medium</option>
+                <option value="3">Large</option>
+                <option value="4">Extra Large</option>
+              </select>
+            </div>
+            <div class="gm-section-label">Buttons</div>
+          </div>
+
           <div class="gm-grid"></div>
 
           <div class="gm-edit">
@@ -208,16 +253,6 @@ class GarageMonitorHotkeyCard extends HTMLElement {
             <div class="gm-row"><label>Entity</label><select class="gm-f-entity"></select></div>
             <div class="gm-row"><label>Service</label><select class="gm-f-service"></select></div>
 
-            <div class="gm-section-label">Highlight When Active</div>
-            <div class="gm-row">
-              <label>Compare</label>
-              <select class="gm-f-matchtype">
-                <option value="none">Never</option>
-                <option value="source">Source is...</option>
-                <option value="state">Power state is...</option>
-              </select>
-              <input class="gm-f-match" type="text" placeholder="value, e.g. HDMI or on">
-            </div>
             <div class="gm-actions">
               <button class="gm-cancel" type="button">Cancel</button>
               <button class="gm-save" type="button">Save Slot</button>
@@ -228,6 +263,9 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     `;
     this._gridEl = this.querySelector(".gm-grid");
     this._editEl = this.querySelector(".gm-edit");
+    this.querySelector(".gm-mode-toggle").addEventListener("click", () => {
+      this._setMode(this._mode === "edit" ? "view" : "edit");
+    });
     this.querySelector(".gm-cancel").addEventListener("click", () => this._closeEdit());
     this.querySelector(".gm-save").addEventListener("click", () => this._saveEdit());
     this._populateIconOptions();
@@ -252,6 +290,16 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     this.querySelector(".gm-f-fontsize").value = this._layout.fontSize || 2;
     this.querySelector(".gm-f-headertext").value = this._layout.headerText || "Garage Monitor";
     this.querySelector(".gm-f-headerfontsize").value = this._layout.headerFontSize || 2;
+    this.querySelector(".gm-panel-title").textContent = this._layout.headerText || "Garage Monitor";
+  }
+
+  _setMode(mode) {
+    this._mode = mode;
+    const editing = mode === "edit";
+    this.querySelector(".gm-mode-toggle").textContent = editing ? "Done" : "Edit Layout";
+    this.querySelector(".gm-layout-settings").classList.toggle("open", editing);
+    if (!editing) this._closeEdit();
+    this._renderGrid();
   }
 
   _saveLayout() {
@@ -309,6 +357,11 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     }
   }
 
+  _fireSlotAction(s) {
+    if (!s.domain || !s.service) return;
+    this._hass.callService(s.domain, s.service, { entity_id: s.entity });
+  }
+
   _renderGrid() {
     const cols = this._layout.cols || 3;
     const count = this._activeCount();
@@ -319,12 +372,40 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     const labelPx = labelPxByFontSize[this._layout.fontSize] || 13;
     this._gridEl.style.setProperty("--gm-label-px", `${labelPx}px`);
     this._gridEl.innerHTML = "";
+    const editing = this._mode === "edit";
     for (let i = 0; i < count; i++) {
       const s = this._slots[i] || this._defaultSlot();
       const tile = document.createElement("div");
       tile.className = "gm-tile";
-      tile.draggable = true;
       tile.dataset.index = String(i);
+
+      if (editing) {
+        const controls = document.createElement("div");
+        controls.className = "gm-tile-controls";
+        const upBtn = document.createElement("button");
+        upBtn.type = "button";
+        upBtn.textContent = "▲";
+        upBtn.title = "Move up a position";
+        upBtn.disabled = i === 0;
+        upBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this._moveSlot(i, -1);
+        });
+        const downBtn = document.createElement("button");
+        downBtn.type = "button";
+        downBtn.textContent = "▼";
+        downBtn.title = "Move down a position";
+        downBtn.disabled = i === count - 1;
+        downBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this._moveSlot(i, 1);
+        });
+        controls.appendChild(upBtn);
+        controls.appendChild(downBtn);
+        tile.appendChild(controls);
+      } else {
+        if (!s.label && !(s.domain && s.service)) tile.classList.add("gm-inert");
+      }
 
       const iconWrap = document.createElement("div");
       iconWrap.className = "gm-icon";
@@ -336,42 +417,30 @@ class GarageMonitorHotkeyCard extends HTMLElement {
       labelEl.textContent = s.label || "(empty)";
       tile.appendChild(labelEl);
 
-      tile.addEventListener("click", () => this._openEdit(i));
-      tile.addEventListener("dragstart", (e) => {
-        this._dragSrc = i;
-        e.dataTransfer.effectAllowed = "move";
-      });
-      tile.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        tile.classList.add("dragover");
-      });
-      tile.addEventListener("dragleave", () => tile.classList.remove("dragover"));
-      tile.addEventListener("drop", (e) => {
-        e.preventDefault();
-        tile.classList.remove("dragover");
-        if (this._dragSrc !== null && this._dragSrc !== i) {
-          this._swapSlots(this._dragSrc, i);
-        }
-        this._dragSrc = null;
+      tile.addEventListener("click", () => {
+        if (editing) this._openEdit(i);
+        else this._fireSlotAction(s);
       });
 
       this._gridEl.appendChild(tile);
     }
   }
 
-  _swapSlots(a, b) {
-    const tmp = this._slots[a];
-    this._slots[a] = this._slots[b];
-    this._slots[b] = tmp;
-    this._persistSlot(a);
-    this._persistSlot(b);
+  _moveSlot(i, delta) {
+    const j = i + delta;
+    if (j < 0 || j >= this._activeCount()) return;
+    const tmp = this._slots[i];
+    this._slots[i] = this._slots[j];
+    this._slots[j] = tmp;
+    this._persistSlot(i);
+    this._persistSlot(j);
     this._renderGrid();
   }
 
   _persistSlot(i) {
     const value = JSON.stringify(this._slots[i]);
     if (value.length > 255) {
-      alert(`Slot ${i} JSON is ${value.length} chars, over the 255-char input_text limit. Shorten the label/icon/match.`);
+      alert(`Slot ${i} JSON is ${value.length} chars, over the 255-char input_text limit. Shorten the label/icon.`);
       return;
     }
     this._raw[i] = value;
@@ -446,8 +515,6 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     const s = this._slots[i] || this._defaultSlot();
     this.querySelector(".gm-f-label").value = s.label || "";
     this.querySelector(".gm-f-icon").value = s.icon || "";
-    this.querySelector(".gm-f-matchtype").value = s.matchType || "none";
-    this.querySelector(".gm-f-match").value = s.match || "";
     this._populateDomainOptions(s.domain || "");
     this._populateEntityOptions(s.domain || "", s.entity || "");
     this._populateServiceOptions(s.domain || "", s.service || "");
@@ -469,9 +536,7 @@ class GarageMonitorHotkeyCard extends HTMLElement {
     const domain = this.querySelector(".gm-f-domain").value;
     const entity = domain ? this.querySelector(".gm-f-entity").value : "";
     const service = domain ? this.querySelector(".gm-f-service").value : "";
-    const matchType = this.querySelector(".gm-f-matchtype").value;
-    const match = this.querySelector(".gm-f-match").value.trim();
-    this._slots[i] = { label, icon, domain, service, entity, matchType, match };
+    this._slots[i] = { label, icon, domain, service, entity };
     this._persistSlot(i);
     this._renderGrid();
     this._closeEdit();

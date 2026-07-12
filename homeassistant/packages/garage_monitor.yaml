@@ -69,11 +69,16 @@ input_select:
       - SBS
     initial: Unknown
 
-# input_text.garage_monitor_slot_0..5: the M5Paper hotkey pad's button
-# layout, one JSON object per grid slot (3 cols x 2 rows, row-major, slot 0
-# = top-left). Layout: top row = Upper monitor, bottom row = Lower monitor,
-# left to right = Mac Mini, Laptop, SBS. input_text has a hard 255-char max
-# in this HA version, which is too small for one JSON blob holding all 6
+# input_text.garage_monitor_slot_0..9: the M5Paper hotkey pad's button
+# layout, one JSON object per grid slot. Layout: 4 columns x 2 rows, top row
+# = Upper monitor, bottom row = Lower monitor, column 0 split into two
+# half-height slots (On/Off) instead of one full-height slot (firmware
+# layout_config field "splitFirstCol": true - see garage_monitor_layout_config
+# below), columns 1-3 = Mac Mini, Laptop, SBS. Because of the split, slot
+# indices are NOT simple row-major cols*i+row math: row 0 is slots 0-4 (On,
+# Off, Mac Mini, Laptop, SBS), row 1 is slots 5-9 (same order) - one row
+# consumes cols+1=5 slots, not cols=4. input_text has a hard 255-char max in
+# this HA version, which is too small for one JSON blob holding all these
 # buttons, hence one entity per slot. Edited via the "Garage Monitor Hotkey
 # Layout" card on the dashboard; the M5Paper firmware polls these (same
 # cadence as its status poll) and rebuilds its on-screen grid from whatever
@@ -96,43 +101,43 @@ input_text:
   garage_monitor_slot_0:
     name: Garage Monitor Slot 0
     max: 255
-    initial: '{"label":"Mac Mini","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_macmini","matchType":"none","match":""}'
+    initial: '{"label":"On","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_power_on","matchType":"none","match":""}'
   garage_monitor_slot_1:
     name: Garage Monitor Slot 1
     max: 255
-    initial: '{"label":"Laptop","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_laptop","matchType":"none","match":""}'
+    initial: '{"label":"Off","icon":"mdi:monitor-off","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_power_off","matchType":"none","match":""}'
   garage_monitor_slot_2:
     name: Garage Monitor Slot 2
     max: 255
-    initial: '{"label":"SBS","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_sbs","matchType":"none","match":""}'
+    initial: '{"label":"Mac Mini","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_macmini","matchType":"none","match":""}'
   garage_monitor_slot_3:
     name: Garage Monitor Slot 3
     max: 255
-    initial: '{"label":"Mac Mini","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_macmini","matchType":"none","match":""}'
+    initial: '{"label":"Laptop","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_laptop","matchType":"none","match":""}'
   garage_monitor_slot_4:
     name: Garage Monitor Slot 4
     max: 255
-    initial: '{"label":"Laptop","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_laptop","matchType":"none","match":""}'
+    initial: '{"label":"SBS","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_sbs","matchType":"none","match":""}'
   garage_monitor_slot_5:
     name: Garage Monitor Slot 5
     max: 255
-    initial: '{"label":"SBS","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_sbs","matchType":"none","match":""}'
+    initial: '{"label":"On","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_power_on","matchType":"none","match":""}'
   garage_monitor_slot_6:
     name: Garage Monitor Slot 6
     max: 255
-    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+    initial: '{"label":"Off","icon":"mdi:monitor-off","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_power_off","matchType":"none","match":""}'
   garage_monitor_slot_7:
     name: Garage Monitor Slot 7
     max: 255
-    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+    initial: '{"label":"Mac Mini","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_macmini","matchType":"none","match":""}'
   garage_monitor_slot_8:
     name: Garage Monitor Slot 8
     max: 255
-    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+    initial: '{"label":"Laptop","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_laptop","matchType":"none","match":""}'
   garage_monitor_slot_9:
     name: Garage Monitor Slot 9
     max: 255
-    initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
+    initial: '{"label":"SBS","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_sbs","matchType":"none","match":""}'
   garage_monitor_slot_10:
     name: Garage Monitor Slot 10
     max: 255
@@ -142,13 +147,20 @@ input_text:
     max: 255
     initial: '{"label":"","icon":"mdi:help-circle-outline","domain":"","service":"","entity":"","matchType":"none","match":""}'
   # Layout config for the M5Paper hotkey pad: {"orientation":"landscape"|
-  # "portrait","cols":N,"rows":M}. cols*rows must be <= 12 (the size of the
-  # slot_0..slot_11 pool above) - slots beyond cols*rows are provisioned but
-  # unused. Edited via the same "Garage Monitor Hotkey Layout" card.
+  # "portrait","cols":N,"rows":M,"splitFirstCol":bool,"fontSize":N,
+  # "headerText":str,"headerFontSize":N}. splitFirstCol turns column 0 of
+  # every row into two half-height slots (On/Off) instead of one - see the
+  # slot-index note above. Without it, cols*rows must be <= 12 (the size of
+  # the slot_0..slot_11 pool above); with it, cols*rows+rows must be <= 12.
+  # Slots beyond what the shape needs are provisioned but unused. Edited via
+  # the same "Garage Monitor Hotkey Layout" card - this `initial:` only
+  # applies the first time the entity is ever created (see the input_text
+  # note above), so it's kept here mainly as documentation of the current
+  # live value, not as something a YAML edit alone updates.
   garage_monitor_layout_config:
     name: Garage Monitor Layout Config
     max: 255
-    initial: '{"orientation":"landscape","cols":3,"rows":2}'
+    initial: '{"orientation":"landscape","cols":4,"rows":2,"splitFirstCol":true,"fontSize":4,"headerText":"Garage Monitors","headerFontSize":2}'
 
 script:
   garage_monitor_lower_power_on:

@@ -1,14 +1,22 @@
-# Garage Monitor (Samsung G95SC) control
+# Garage Monitor (2x Samsung G95SC - Upper and Lower) control
 #
-# Entities used: media_player.garage_garage_monitor_ls49cg954snxza,
-#                remote.garage_garage_monitor_ls49cg954snxza
+# Entities used:
+#   Lower: media_player.garage_garage_monitor_ls49cg954snxza,
+#          remote.garage_garage_monitor_ls49cg954snxza
+#   Upper: media_player.garage_garage_monitor_upper_2,
+#          remote.garage_garage_monitor_upper_2
+#   (media_player.garage_garage_monitor_upper / remote.garage_garage_monitor_upper,
+#   with no "_2" suffix, are a stale "unavailable" duplicate left over from an
+#   earlier add attempt for the Upper monitor - do not use them.)
 #
-# Power: media_player.turn_on (Wake-on-LAN) does not work on this monitor -
+# Power: media_player.turn_on (Wake-on-LAN) does not work on either monitor -
 # confirmed 2026-07-11 the monitor's network/Tizen stack stays fully live
 # even in standby (PowerState: standby, but pingable and REST API reachable),
 # so WOL is never needed/honored. KEY_POWER via remote.send_command works
 # instead, but it's a physical toggle key, so every use here is guarded by a
-# state condition to avoid accidentally flipping the wrong direction.
+# state condition to avoid accidentally flipping the wrong direction. Every
+# source-select script below also powers its monitor on first if it's off,
+# so there's no separate "power on" step needed before picking a source.
 #
 # HDMI/DisplayPort selection uses remote key navigation rather than
 # media_player.select_source, because the Samsung integration's source_list
@@ -16,77 +24,99 @@
 # The KEY_SOURCE menu is navigated by first pressing UP three times to clamp
 # to the top of the list (Samsung TV Plus) regardless of the current
 # highlight, then DOWN N times to the target row. This also collapses
-# Multi View back to a single input.
+# Multi View back to a single input. Assumed identical menu structure on
+# both monitors (same model) - the Upper scripts below reuse the exact same
+# keypress counts as the already-confirmed Lower ones.
 #
-# Multi View (PBP) sequence confirmed working 2026-07-11: Home, Left, Down,
-# Down, Select, Select, Select. Produces one fixed HDMI+DisplayPort layout;
-# the orientation (which side each source lands on) has not been isolated.
+# Mac Mini is wired to HDMI, laptop to DisplayPort, the same way on both
+# monitors (confirmed 2026-07-12).
 #
-# The input/Multi View scripts wake the monitor first only if it's off
-# (skipped entirely when already on, so the common case has no added delay).
+# SBS (Multi View/PBP) sequence confirmed working 2026-07-11 on Lower: Home,
+# Left, Down, Down, Select, Select, Select. Produces one fixed HDMI+
+# DisplayPort layout - which side each source lands on has not been
+# isolated, so there is one SBS button per monitor (not a left/right
+# choice).
 #
-# input_select.garage_monitor_source: the samsungtv integration's
-# media_player entity never reports a current source attribute (confirmed
-# 2026-07-11 - only a static source_list is exposed), so there is no way to
-# read the monitor's actual active input back from HA. This helper is
-# self-tracked instead: each input-changing script sets it as its last step.
-# It will be wrong if the input is changed by some means outside these
-# scripts (e.g. the physical remote), but accurate for everything done
-# through HA or the M5Paper hotkey pad.
+# input_select.garage_monitor_{lower,upper}_source: the samsungtv
+# integration's media_player entity never reports a current source
+# attribute (confirmed 2026-07-11 - only a static source_list is exposed),
+# so there is no way to read a monitor's actual active input back from HA.
+# These helpers are self-tracked instead: each source-changing script sets
+# its monitor's helper as its last step. Wrong if the input is changed by
+# some means outside these scripts (e.g. the physical remote), but accurate
+# for everything done through HA or the M5Paper hotkey pad. No longer tied
+# to any pad-side "highlight when active" rendering - that feature was
+# removed from the hotkey pad firmware; this is purely for visibility in HA
+# itself now.
 
 input_select:
-  garage_monitor_source:
-    name: Garage Monitor Source
+  garage_monitor_lower_source:
+    name: Garage Monitor Lower Source
     icon: mdi:video-input-hdmi
     options:
       - Unknown
-      - HDMI
-      - DisplayPort
-      - Multi View
+      - Mac Mini
+      - Laptop
+      - SBS
+    initial: Unknown
+  garage_monitor_upper_source:
+    name: Garage Monitor Upper Source
+    icon: mdi:video-input-hdmi
+    options:
+      - Unknown
+      - Mac Mini
+      - Laptop
+      - SBS
     initial: Unknown
 
 # input_text.garage_monitor_slot_0..5: the M5Paper hotkey pad's button
 # layout, one JSON object per grid slot (3 cols x 2 rows, row-major, slot 0
-# = top-left). input_text has a hard 255-char max in this HA version, which
-# is too small for one JSON blob holding all 6 buttons, hence one entity
-# per slot. Edited via the "Garage Monitor Hotkey Layout" card on the
-# dashboard; the M5Paper firmware polls these (same cadence as its status
-# poll) and rebuilds its on-screen grid from whatever it finds here.
+# = top-left). Layout: top row = Upper monitor, bottom row = Lower monitor,
+# left to right = Mac Mini, Laptop, SBS. input_text has a hard 255-char max
+# in this HA version, which is too small for one JSON blob holding all 6
+# buttons, hence one entity per slot. Edited via the "Garage Monitor Hotkey
+# Layout" card on the dashboard; the M5Paper firmware polls these (same
+# cadence as its status poll) and rebuilds its on-screen grid from whatever
+# it finds here.
 #
 # Schema per slot: {"label": str, "icon": "mdi:xxx", "domain": str, "service":
 # str, "entity": entity_id (domain/service/entity all "" for a refresh-only
 # button), "matchType": "source"|"state"|"none", "match": str}. The firmware
 # calls POST /api/services/<domain>/<service> with {"entity_id": entity} on
 # tap - this is a generic HA service call, not limited to scripts.
-# matchType/match decide when the firmware highlights the button as
-# "active": "source" compares against input_select.garage_monitor_source,
-# "state" compares against media_player state (on/off), "none" never
-# highlights.
+# matchType/match are vestigial (the pad no longer renders any "active"
+# highlight, that feature was removed) - left as "none"/"" throughout.
+#
+# NOTE: input_text's `initial:` only applies the first time an entity is
+# ever created - it does NOT retroactively update an already-existing
+# entity's current value on a config reload/restart. After deploying a
+# content change to slot_0..5 here, also push the new value live with
+# input_text.set_value for each changed slot.
 input_text:
   garage_monitor_slot_0:
     name: Garage Monitor Slot 0
     max: 255
-    initial: '{"label":"HDMI","icon":"mdi:video-input-hdmi","domain":"script","service":"turn_on","entity":"script.garage_monitor_input_hdmi","matchType":"source","match":"HDMI"}'
+    initial: '{"label":"Mac Mini","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_macmini","matchType":"none","match":""}'
   garage_monitor_slot_1:
     name: Garage Monitor Slot 1
     max: 255
-    initial: '{"label":"DisplayPort","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_input_displayport","matchType":"source","match":"DisplayPort"}'
+    initial: '{"label":"Laptop","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_laptop","matchType":"none","match":""}'
   garage_monitor_slot_2:
     name: Garage Monitor Slot 2
     max: 255
-    initial: '{"label":"Multi View","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_multiview","matchType":"source","match":"Multi View"}'
+    initial: '{"label":"SBS","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_upper_sbs","matchType":"none","match":""}'
   garage_monitor_slot_3:
     name: Garage Monitor Slot 3
     max: 255
-    initial: '{"label":"Power On","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_power_on","matchType":"state","match":"on"}'
+    initial: '{"label":"Mac Mini","icon":"mdi:monitor","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_macmini","matchType":"none","match":""}'
   garage_monitor_slot_4:
     name: Garage Monitor Slot 4
     max: 255
-    initial: '{"label":"Power Off","icon":"mdi:monitor-off","domain":"script","service":"turn_on","entity":"script.garage_monitor_power_off","matchType":"state","match":"off"}'
+    initial: '{"label":"Laptop","icon":"mdi:laptop","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_laptop","matchType":"none","match":""}'
   garage_monitor_slot_5:
     name: Garage Monitor Slot 5
     max: 255
-    initial: '{"label":"Refresh","icon":"mdi:refresh","domain":"","service":"","entity":"","matchType":"none","match":""}'
+    initial: '{"label":"SBS","icon":"mdi:view-split-vertical","domain":"script","service":"turn_on","entity":"script.garage_monitor_lower_sbs","matchType":"none","match":""}'
   garage_monitor_slot_6:
     name: Garage Monitor Slot 6
     max: 255
@@ -121,8 +151,8 @@ input_text:
     initial: '{"orientation":"landscape","cols":3,"rows":2}'
 
 script:
-  garage_monitor_power_on:
-    alias: Garage Monitor - Power On
+  garage_monitor_lower_power_on:
+    alias: Garage Monitor Lower - Power On
     icon: mdi:monitor
     sequence:
       - condition: state
@@ -135,8 +165,8 @@ script:
           command: KEY_POWER
     mode: single
 
-  garage_monitor_power_off:
-    alias: Garage Monitor - Power Off
+  garage_monitor_lower_power_off:
+    alias: Garage Monitor Lower - Power Off
     icon: mdi:monitor-off
     sequence:
       - action: media_player.turn_off
@@ -144,9 +174,32 @@ script:
           entity_id: media_player.garage_garage_monitor_ls49cg954snxza
     mode: single
 
-  garage_monitor_input_hdmi:
-    alias: Garage Monitor - Switch to HDMI
-    icon: mdi:video-input-hdmi
+  garage_monitor_upper_power_on:
+    alias: Garage Monitor Upper - Power On
+    icon: mdi:monitor
+    sequence:
+      - condition: state
+        entity_id: media_player.garage_garage_monitor_upper_2
+        state: "off"
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_upper_2
+        data:
+          command: KEY_POWER
+    mode: single
+
+  garage_monitor_upper_power_off:
+    alias: Garage Monitor Upper - Power Off
+    icon: mdi:monitor-off
+    sequence:
+      - action: media_player.turn_off
+        target:
+          entity_id: media_player.garage_garage_monitor_upper_2
+    mode: single
+
+  garage_monitor_lower_macmini:
+    alias: Garage Monitor Lower - Mac Mini (HDMI)
+    icon: mdi:monitor
     sequence:
       - if:
           - condition: state
@@ -174,13 +227,13 @@ script:
           delay_secs: 1.5
       - action: input_select.select_option
         target:
-          entity_id: input_select.garage_monitor_source
+          entity_id: input_select.garage_monitor_lower_source
         data:
-          option: HDMI
+          option: Mac Mini
     mode: single
 
-  garage_monitor_input_displayport:
-    alias: Garage Monitor - Switch to DisplayPort
+  garage_monitor_lower_laptop:
+    alias: Garage Monitor Lower - Laptop (DisplayPort)
     icon: mdi:laptop
     sequence:
       - if:
@@ -210,13 +263,13 @@ script:
           delay_secs: 1.5
       - action: input_select.select_option
         target:
-          entity_id: input_select.garage_monitor_source
+          entity_id: input_select.garage_monitor_lower_source
         data:
-          option: DisplayPort
+          option: Laptop
     mode: single
 
-  garage_monitor_multiview:
-    alias: Garage Monitor - Multi View (HDMI + DisplayPort)
+  garage_monitor_lower_sbs:
+    alias: Garage Monitor Lower - SBS (HDMI + DisplayPort)
     icon: mdi:view-split-vertical
     sequence:
       - if:
@@ -246,7 +299,114 @@ script:
           delay_secs: 1.5
       - action: input_select.select_option
         target:
-          entity_id: input_select.garage_monitor_source
+          entity_id: input_select.garage_monitor_lower_source
         data:
-          option: Multi View
+          option: SBS
+    mode: single
+
+  garage_monitor_upper_macmini:
+    alias: Garage Monitor Upper - Mac Mini (HDMI)
+    icon: mdi:monitor
+    sequence:
+      - if:
+          - condition: state
+            entity_id: media_player.garage_garage_monitor_upper_2
+            state: "off"
+        then:
+          - action: remote.send_command
+            target:
+              entity_id: remote.garage_garage_monitor_upper_2
+            data:
+              command: KEY_POWER
+          - delay:
+              seconds: 8
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_upper_2
+        data:
+          command:
+            - KEY_SOURCE
+            - KEY_UP
+            - KEY_UP
+            - KEY_UP
+            - KEY_DOWN
+            - KEY_ENTER
+          delay_secs: 1.5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.garage_monitor_upper_source
+        data:
+          option: Mac Mini
+    mode: single
+
+  garage_monitor_upper_laptop:
+    alias: Garage Monitor Upper - Laptop (DisplayPort)
+    icon: mdi:laptop
+    sequence:
+      - if:
+          - condition: state
+            entity_id: media_player.garage_garage_monitor_upper_2
+            state: "off"
+        then:
+          - action: remote.send_command
+            target:
+              entity_id: remote.garage_garage_monitor_upper_2
+            data:
+              command: KEY_POWER
+          - delay:
+              seconds: 8
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_upper_2
+        data:
+          command:
+            - KEY_SOURCE
+            - KEY_UP
+            - KEY_UP
+            - KEY_UP
+            - KEY_DOWN
+            - KEY_DOWN
+            - KEY_ENTER
+          delay_secs: 1.5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.garage_monitor_upper_source
+        data:
+          option: Laptop
+    mode: single
+
+  garage_monitor_upper_sbs:
+    alias: Garage Monitor Upper - SBS (HDMI + DisplayPort)
+    icon: mdi:view-split-vertical
+    sequence:
+      - if:
+          - condition: state
+            entity_id: media_player.garage_garage_monitor_upper_2
+            state: "off"
+        then:
+          - action: remote.send_command
+            target:
+              entity_id: remote.garage_garage_monitor_upper_2
+            data:
+              command: KEY_POWER
+          - delay:
+              seconds: 8
+      - action: remote.send_command
+        target:
+          entity_id: remote.garage_garage_monitor_upper_2
+        data:
+          command:
+            - KEY_HOME
+            - KEY_LEFT
+            - KEY_DOWN
+            - KEY_DOWN
+            - KEY_ENTER
+            - KEY_ENTER
+            - KEY_ENTER
+          delay_secs: 1.5
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.garage_monitor_upper_source
+        data:
+          option: SBS
     mode: single

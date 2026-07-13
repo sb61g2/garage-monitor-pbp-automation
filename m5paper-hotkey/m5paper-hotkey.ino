@@ -71,7 +71,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "24";
+const char* FIRMWARE_VERSION = "25";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -826,14 +826,26 @@ void setup() {
   drawUI();
   if (refreshLayoutAndSlots()) {
     // Not the normal drawUI() path - see drawUIOnce()'s forceQuality
-    // comment. WiFi is still on at this exact point (refreshLayoutAndSlots()
-    // just used it), so give it the same teardown+settle drawUI() would,
-    // then draw with a forced full quality pass instead of the fast path.
+    // comment. A first attempt at this (v24) used forceQuality with only a
+    // token 500ms WiFi-off delay and made things dramatically worse - a
+    // gray-to-black gradient (clean at the top of the scan, worse toward
+    // the bottom), which is exactly the *original* documented epd_quality
+    // corruption signature from the very first debugging session on this
+    // pad (its multi-pass GC16 waveform getting interrupted mid-refresh by
+    // residual WiFi activity). epd_quality is the *more* timing-sensitive
+    // mode, so it needs the full original mitigation ritual - a real
+    // clearDisplay() ghost-clearing pass plus ~800ms settle on both sides -
+    // not a shortened version of it.
     if (WiFi.status() == WL_CONNECTED) {
       WiFi.mode(WIFI_OFF);
-      delay(500);
+      delay(800);
     }
+    auto &d = M5.Display;
+    d.setEpdMode(epd_mode_t::epd_quality);
+    d.clearDisplay();
+    delay(800);
     drawUIOnce(true);
+    delay(800);
   }
 }
 

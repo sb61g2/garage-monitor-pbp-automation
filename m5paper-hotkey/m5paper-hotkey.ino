@@ -70,7 +70,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "17";
+const char* FIRMWARE_VERSION = "18";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -660,12 +660,28 @@ void flashPressedFeedback(const Slot &s) {
 // dead/crashed/powered-off pad can't draw anything at all, so in practice:
 // moon visible = genuinely asleep and fine; moon absent on a screen that's
 // unresponsive to touch = not properly asleep, check power/charge.
-// Uses display(x, y, w, h) - a real windowed update scoped to just this
-// icon (see Panel_EPDiy::display(), which only refreshes the accumulated
-// modified-region rect, not the whole panel) - rather than the bare
-// display() used everywhere else in this file, so showing/hiding it is a
-// small partial refresh. Always fast/DU mode - safe now that setup() primes
-// the panel with a one-time quality-mode clear before this is ever called.
+// Uses display(x, y, w, h) - a real windowed update (see Panel_EPDiy::
+// display(), which unions the given rect into the accumulated
+// modified-region and only refreshes that, not the whole panel) - rather
+// than the bare display() used everywhere else in this file, so showing/
+// hiding it is a small partial refresh, not a full-panel one. Always
+// fast/DU mode - safe now that setup() primes the panel with a one-time
+// quality-mode clear before this is ever called.
+//
+// The refreshed rect passed to display() deliberately spans the full
+// header width/height (x=0..panel width, y=0..HEADER_H), even though the
+// actual icon content drawn is only the small ICON_SIZE box - a windowed
+// DU refresh scoped tightly to just the icon left a faint but perfectly
+// straight horizontal line at the window's top/bottom edge rows, spanning
+// the full panel width regardless of the narrow x-range drawn (the
+// row-driver's refresh pulse doesn't respect column clipping at the
+// window boundary - a real, deterministic epdiy partial-refresh artifact,
+// not noise). Passing display() a wider rect doesn't require redrawing
+// that whole area's content (the header text/refresh icon already sit
+// correctly in the frame buffer from the last drawUIOnce() and just get
+// re-flushed unchanged) - it only widens the physical refresh so the
+// boundary rows land on the screen's top edge and the header's own
+// existing black divider line instead of floating in blank space.
 // Always called before any radio activity starts in the same code path
 // (right before entering light sleep, or as the very first thing on a
 // touch wake, ahead of the BLE/WiFi call) so it never races the WiFi-
@@ -680,7 +696,7 @@ void drawSleepBadge(bool visible) {
       d.drawBitmap(SLEEP_BADGE_X, SLEEP_BADGE_Y, moonIcon, ICON_SIZE, ICON_SIZE, COL_BLACK, COL_WHITE);
     }
   }
-  d.display(SLEEP_BADGE_X, SLEEP_BADGE_Y, ICON_SIZE, ICON_SIZE);
+  d.display(0, 0, d.width(), HEADER_H);
 }
 
 // GPIO-only wake, no periodic timer wake - this pad is a "dumb" remote

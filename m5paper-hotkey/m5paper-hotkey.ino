@@ -54,6 +54,7 @@
 #include <HTTPUpdate.h>
 #include <ArduinoJson.h>
 #include <esp_sleep.h>
+#include <esp_ota_ops.h>
 #include <driver/gpio.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -70,7 +71,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "20";
+const char* FIRMWARE_VERSION = "21";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -624,6 +625,18 @@ void drawUIOnce() {
   Serial.printf("[drawUI] done free_heap=%u\n", ESP.getFreeHeap());
 }
 
+// Number of fast/DU redraws between full quality-mode (GC16) clean passes.
+// DU mode is a weaker, faster waveform that doesn't fully cycle each
+// pixel's optical state the way GC16 does - fine for any single redraw, but
+// it accumulates real, visible ghosting/staining over many repeated DU-only
+// updates (confirmed in practice: faint ghost moon, barely-visible "UPPER"/
+// "LOWER" outlines, after enough back-to-back test cycles). This is the
+// standard e-paper mitigation pattern (e-readers do the same thing every
+// few page turns) - most redraws stay fast, but periodically pay for one
+// full clean cycle to reset the panel before ghosting becomes visible.
+const int QUALITY_CLEAN_INTERVAL = 12;
+int g_redrawsSinceClean = 0;
+
 void drawUI() {
   bool wifiWasOn = (WiFi.status() == WL_CONNECTED);
   if (wifiWasOn) {
@@ -639,12 +652,14 @@ void drawUI() {
     bleTeardown();
     delay(300);
   }
-  // The clearDisplay() ghost-clearing pass (a full black/white/black cycle)
-  // and the generous settling delays around it were mitigations for
-  // epd_quality's slow multi-pass GC16 refresh (see drawUIOnce()). Now that
-  // every redraw is a single-pass DU update, they're dropped in favor of
-  // raw speed - revisit if ghosting turns out to be a real problem in
-  // practice under DU mode.
+  if (++g_redrawsSinceClean >= QUALITY_CLEAN_INTERVAL) {
+    Serial.println("[drawUI] periodic ghosting clean pass");
+    auto &d = M5.Display;
+    d.setEpdMode(epd_mode_t::epd_quality);
+    d.clearDisplay();
+    delay(800);
+    g_redrawsSinceClean = 0;
+  }
   drawUIOnce();
 }
 
@@ -655,11 +670,21 @@ void drawUI() {
 // connection exists yet at this point in the flow, so it can't race one.
 // Not a state to track - the drawUI() that follows once the action has
 // actually run always repaints neutral, so this never lingers.
+//
+// display(0, s.y, width, s.h) rather than the bare display() used to sit
+// here - same fix and same reason as drawSleepBadge(): a DU refresh window
+// scoped tightly to just the tapped tile's x-range left a faint but
+// perfectly straight horizontal line at the window's top/bottom edge rows,
+// spanning the full panel width regardless of the tile's actual (narrower)
+// x-range. Widening only the physical refresh rect to the full width -
+// content drawn is unchanged - moves those boundary rows to the tile's own
+// top/bottom edges, which are already visually bounded by its rounded-rect
+// border, instead of floating in blank grid space.
 void flashPressedFeedback(const Slot &s) {
   auto &d = M5.Display;
   d.setEpdMode(epd_mode_t::epd_fast);
   drawSlot(s, true);
-  d.display();
+  d.display(0, s.y, d.width(), s.h);
 }
 
 // Small fixed-position "asleep" marker, the only visual difference between
@@ -724,6 +749,23 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.printf("[setup] booting, FIRMWARE_VERSION=%s\n", FIRMWARE_VERSION);
+  // This board's partition scheme has app rollback enabled
+  // (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y - confirmed via the compiled
+  // sdkconfig), and nothing in this sketch or the Arduino-ESP32 core ever
+  // called esp_ota_mark_app_valid_cancel_rollback() before this was added.
+  // That means every image landed by checkOTA()'s httpUpdate.update() was
+  // booting straight into "pending verify" and staying there indefinitely -
+  // fine as long as the device never went through another real reset while
+  // pending, but if it ever did (another OTA cycle, a crash, a brownout),
+  // the bootloader's rollback safety net would silently revert to the
+  // last-confirmed image instead of whatever was just published, with zero
+  // visible error. This is the leading suspect for why several published
+  // updates this session appeared to not "stick" despite manual refresh
+  // taps and reboots being observed - not proven beyond doubt, but a real,
+  // directly-confirmed gap regardless of whether it explains every past
+  // case. Call this immediately on every boot so every image confirms
+  // itself valid before it can ever be at risk of an unexpected rollback.
+  esp_ota_mark_app_valid_cancel_rollback();
   auto cfg = M5.config();
   M5.begin(cfg);
 

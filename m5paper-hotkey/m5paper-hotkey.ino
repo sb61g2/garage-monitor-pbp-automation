@@ -13,9 +13,14 @@
 // unnecessary overhead - the highlight round-trip was adding real latency
 // for a feature that wasn't worth the wait).
 //
-// E-ink refresh is full-quality only (epd_quality) on every redraw - no
-// partial/fast refresh for the main grid - to avoid ghosting, per explicit
-// preference. Icons are drawn from a curated set of pre-rasterized MDI
+// E-ink refresh uses fast/DU mode (single-pass, monochrome) for every
+// redraw, main grid included - epd_quality's multi-pass GC16 waveform was
+// tried first (to avoid ghosting) but in practice cost ~1.5-2s and several
+// visible flash passes per redraw with no ghosting benefit worth the
+// latency on this pad's mostly-text/icon content, so it was dropped in
+// favor of snappier single-pass updates (2026-07-13). Revisit if ghosting
+// becomes a visible problem in practice. Icons are drawn from a curated set
+// of pre-rasterized MDI
 // bitmaps (icons.h) with a text-only fallback for anything not in that set
 // - MDI has ~7000 icons, bundling/rendering all of them live isn't
 // reasonable on this hardware.
@@ -65,7 +70,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "15";
+const char* FIRMWARE_VERSION = "16";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -115,10 +120,6 @@ BLECharacteristic* g_configDirtyChar = nullptr;
 BLECharacteristic* g_deviceInfoChar = nullptr;
 bool g_bleReady = false;             // bleSetup() has run
 volatile bool g_bleConnected = false;
-// See drawSleepBadge() - the first fast/DU-mode partial update of a boot
-// renders incorrectly; only becomes safe once a real quality-mode drawUI()
-// has actually run.
-bool g_sleepBadgeFastModeProven = false;
 volatile bool g_bleSubscribed = false; // central has completed start_notify() - safe to notify() now
 volatile bool g_bleAdvertising = false;
 
@@ -532,9 +533,9 @@ void drawSlot(const Slot &s, bool pressed) {
 // 90 degrees so it reads vertically - the standard LovyanGFX technique for
 // rotated text (M5Canvas + pushRotateZoom). 1-bit color depth keeps it hard
 // black/white with no gray fringing from the rotation, matching the sharp
-// look of everything else on this pad. Runs as part of the same
-// epd_quality full-panel refresh already under way in drawUIOnce(), so it
-// needs no display()/settling logic of its own.
+// look of everything else on this pad. Runs as part of the same full-panel
+// refresh already under way in drawUIOnce(), so it needs no display()/
+// settling logic of its own.
 void drawRowLabel(const char* text, int16_t centerX, int16_t centerY) {
   M5Canvas sprite(&M5.Display);
   sprite.setColorDepth(1);
@@ -548,29 +549,21 @@ void drawRowLabel(const char* text, int16_t centerX, int16_t centerY) {
   sprite.deleteSprite();
 }
 
-// The physical e-paper refresh triggered by display() is a multi-second,
-// multi-pass, timing-sensitive software-driven waveform sequence (epdiy).
-// Something preempting the CPU mid-refresh (WiFi radio activity is the
-// leading suspect, matching a documented issue with this exact driver
-// stack) can desync it, producing a partial/gradient-corrupted refresh:
-// confirmed via photo, tiles drawn earlier in the scan render perfectly,
-// later ones fade through a gray gradient with no borders/icons - i.e. a
-// partially-applied waveform, not a logic bug - and it's intermittent
-// rather than deterministic (a genuine logic bug would corrupt every time
-// the same way; this doesn't).
-//
-// Mitigations: WiFi is fully torn down before display() (reconnected
-// lazily by the next haGetEntityState/haCallService via ensureWiFi()), and
-// the whole draw+refresh sequence runs twice - each pass starts with a
-// clean fillScreen(WHITE), so a second pass overwrites any corruption left
-// by a bad first pass. This doesn't fix the underlying cause, but turns an
-// intermittent single-pass failure into something that would need to fail
-// twice in a row to be visible.
+// display() in epd_fast mode is a single-pass monochrome (DU) waveform -
+// much quicker and less timing-sensitive than the old multi-pass epd_quality
+// (GC16) sequence, which was the source of an earlier intermittent
+// gradient-corruption bug (confirmed via photo: tiles drawn earlier in the
+// scan rendered perfectly, later ones faded through a gray gradient with no
+// borders/icons - a partially-applied waveform interrupted mid-refresh, not
+// a logic bug). WiFi is still torn down before every display() call
+// regardless (reconnected lazily by the next haGetEntityState/haCallService
+// via ensureWiFi()) since that mitigation is cheap and the underlying
+// preemption risk isn't fully ruled out under DU mode either.
 void drawUIOnce() {
   auto &d = M5.Display;
   Serial.printf("[drawUI] start free_heap=%u activeCount=%d cols=%d rows=%d orientation=%s\n",
                 ESP.getFreeHeap(), g_activeCount, g_cols, g_rows, g_orientation.c_str());
-  d.setEpdMode(epd_mode_t::epd_quality);
+  d.setEpdMode(epd_mode_t::epd_fast);
   d.fillScreen(COL_WHITE);
 
   int W = d.width();
@@ -637,28 +630,18 @@ void drawUI() {
     bleTeardown();
     delay(300);
   }
-  // Drawing content twice back-to-back was tried and made things worse: if
-  // display() returns before the panel's hardware refresh has *fully*
-  // settled, starting a second draw can interrupt/corrupt the first one -
-  // and since only the last pass is ever visible, that's a straight
-  // downgrade, not "at least one good attempt". A separate clearDisplay()
-  // (a real full black/white/black ghost-clearing cycle, more thorough
-  // than a plain fillScreen) with generous settling delays around each
-  // physical refresh targets the actual symptoms instead: gradient/partial
-  // corruption (settling time) and the persistent line ghosting artifact
-  // (clearDisplay).
-  auto &d = M5.Display;
-  d.setEpdMode(epd_mode_t::epd_quality);
-  d.clearDisplay();
-  delay(800);
+  // The clearDisplay() ghost-clearing pass (a full black/white/black cycle)
+  // and the generous settling delays around it were mitigations for
+  // epd_quality's slow multi-pass GC16 refresh (see drawUIOnce()). Now that
+  // every redraw is a single-pass DU update, they're dropped in favor of
+  // raw speed - revisit if ghosting turns out to be a real problem in
+  // practice under DU mode.
   drawUIOnce();
-  delay(800);
 }
 
 // Genuinely momentary "command received" feedback - a brief epd_fast pulse
-// of just the tapped tile (fast mode is fine here specifically because it's
-// immediately followed by a full epd_quality drawUI() that repaints
-// everything anyway, so any fast-mode imprecision never persists). Always
+// of just the tapped tile, immediately followed by a full drawUI() that
+// repaints everything anyway, so any imprecision never persists. Always
 // called after BLE teardown or with the WiFi call already complete, so it
 // never races an active radio connection, matching every other display()
 // call in this sketch. Not a state to track - the very next drawUI() call
@@ -673,27 +656,23 @@ void flashPressedFeedback(const Slot &s) {
 // Small fixed-position "asleep" marker, the only visual difference between
 // "pad is actually asleep, this tap both wakes it and fires the command"
 // and "pad is already awake" - e-paper otherwise holds whatever was drawn
-// last, so without this there's no way to tell the two states apart.
+// last, so without this there's no way to tell the two states apart. A
+// dead/crashed/powered-off pad can't draw anything at all, so in practice:
+// moon visible = genuinely asleep and fine; moon absent on a screen that's
+// unresponsive to touch = not properly asleep, check power/charge.
 // Uses display(x, y, w, h) - a real windowed update scoped to just this
 // icon (see Panel_EPDiy::display(), which only refreshes the accumulated
 // modified-region rect, not the whole panel) - rather than the bare
 // display() used everywhere else in this file, so showing/hiding it is a
-// small partial refresh instead of the ~1.6s full-panel dance.
+// small partial refresh. Always fast/DU mode - safe now that setup() primes
+// the panel with a one-time quality-mode clear before this is ever called.
 // Always called before any radio activity starts in the same code path
 // (right before entering light sleep, or as the very first thing on a
 // touch wake, ahead of the BLE/WiFi call) so it never races the WiFi-
-// interference corruption issue documented on drawUI().
+// interference corruption issue documented on drawUIOnce().
 void drawSleepBadge(bool visible) {
   auto &d = M5.Display;
-  // The very first fast/DU-mode partial update of a boot has rendered
-  // wrong (inverted colors, only half the region drawn) every time this
-  // has been tested - even after priming it with an extra throwaway
-  // draw-then-clear pair, which ruled out "just needs repetition" as the
-  // explanation. What's actually reliable: a quality-mode windowed update
-  // (slower, still just this small icon rather than the whole panel, but
-  // correct). So the first-ever call this boot always uses quality mode;
-  // every call after that uses fast mode.
-  d.setEpdMode(g_sleepBadgeFastModeProven ? epd_mode_t::epd_fast : epd_mode_t::epd_quality);
+  d.setEpdMode(epd_mode_t::epd_fast);
   d.fillRect(SLEEP_BADGE_X, SLEEP_BADGE_Y, ICON_SIZE, ICON_SIZE, COL_WHITE);
   if (visible) {
     const uint8_t* moonIcon = findIcon("mdi:weather-night");
@@ -702,7 +681,6 @@ void drawSleepBadge(bool visible) {
     }
   }
   d.display(SLEEP_BADGE_X, SLEEP_BADGE_Y, ICON_SIZE, ICON_SIZE);
-  g_sleepBadgeFastModeProven = true;
 }
 
 // GPIO-only wake, no periodic timer wake - this pad is a "dumb" remote
@@ -726,6 +704,15 @@ void setup() {
 
   COL_BLACK = M5.Display.color888(0, 0, 0);
   COL_WHITE = M5.Display.color888(255, 255, 255);
+
+  // One-time quality-mode (GC16) clear to establish a clean reference frame
+  // for the panel - every redraw after this uses fast/DU mode (see
+  // drawUIOnce()/drawSleepBadge()), but DU updates starting from an unknown
+  // post-power-on panel state have rendered wrong (inverted/half-drawn) in
+  // testing. Paid once per boot, not per action, so it doesn't cost
+  // anything against the snappiness this pad otherwise optimizes for.
+  M5.Display.setEpdMode(epd_mode_t::epd_quality);
+  M5.Display.clearDisplay();
 
 #if USE_BLE
   bleSetup();

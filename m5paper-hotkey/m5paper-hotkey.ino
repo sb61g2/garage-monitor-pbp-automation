@@ -71,7 +71,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "23";
+const char* FIRMWARE_VERSION = "24";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -569,11 +569,22 @@ void drawRowLabel(const char* text, int16_t centerX, int16_t centerY) {
 // regardless (reconnected lazily by the next haGetEntityState/haCallService
 // via ensureWiFi()) since that mitigation is cheap and the underlying
 // preemption risk isn't fully ruled out under DU mode either.
-void drawUIOnce() {
+// forceQuality: used exactly once per boot, for the transition from the
+// blank cold-boot placeholder to the first real live-content redraw (see
+// setup()) - that specific transition reproducibly showed missing row-label
+// text and fading slots under fast/DU mode, on every boot, regardless of
+// how much WiFi settle delay preceded it (tried up to 1.8s combined -
+// didn't help, ruling out RF-interference timing as the actual cause here).
+// Every other redraw in normal operation (loop()'s touch handler) uses the
+// exact same split-column layout and WiFi usage and renders correctly, so
+// whatever's specific to this one transition isn't fully understood - but
+// forcing a proper multi-pass epd_quality refresh for just this one-time
+// event costs nothing ongoing and reliably sidesteps it.
+void drawUIOnce(bool forceQuality = false) {
   auto &d = M5.Display;
   Serial.printf("[drawUI] start free_heap=%u activeCount=%d cols=%d rows=%d orientation=%s\n",
                 ESP.getFreeHeap(), g_activeCount, g_cols, g_rows, g_orientation.c_str());
-  d.setEpdMode(epd_mode_t::epd_fast);
+  d.setEpdMode(forceQuality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
   d.fillScreen(COL_WHITE);
 
   int W = d.width();
@@ -814,7 +825,15 @@ void setup() {
   layoutSlots();
   drawUI();
   if (refreshLayoutAndSlots()) {
-    drawUI();
+    // Not the normal drawUI() path - see drawUIOnce()'s forceQuality
+    // comment. WiFi is still on at this exact point (refreshLayoutAndSlots()
+    // just used it), so give it the same teardown+settle drawUI() would,
+    // then draw with a forced full quality pass instead of the fast path.
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.mode(WIFI_OFF);
+      delay(500);
+    }
+    drawUIOnce(true);
   }
 }
 

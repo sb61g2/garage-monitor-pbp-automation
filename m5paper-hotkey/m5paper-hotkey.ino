@@ -71,7 +71,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "22";
+const char* FIRMWARE_VERSION = "23";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -641,7 +641,7 @@ void drawUI() {
   bool wifiWasOn = (WiFi.status() == WL_CONNECTED);
   if (wifiWasOn) {
     WiFi.mode(WIFI_OFF);
-    delay(500);
+    delay(800);
   }
   // BLE and WiFi share the same 2.4GHz RF front end on the ESP32-S3, so
   // treat active BLE the same way as WiFi above: fully quiet before the
@@ -663,9 +663,14 @@ void drawUI() {
   // redraw (before any WiFi activity had happened at all) - the same
   // "content drawn later in the scan corrupts first" signature as the
   // original documented WiFi-interference bug. The RF-quiesce requirement
-  // looks independent of epd_mode; a smaller settle than epd_quality's old
-  // 800+800ms, not zero, is the fix.
-  delay(300);
+  // looks independent of epd_mode. v22's first attempt (500+300ms) fixed
+  // ordinary per-action redraws but wasn't enough specifically for the very
+  // first live-content redraw in setup() - the single heaviest WiFi session
+  // of the boot (fetching all 12 slots + layout for the first time ever) -
+  // so the WiFi-specific delay above was raised further rather than the
+  // shared one, on the theory that a longer prior radio-on duration needs
+  // more settle time, not just a bigger flat minimum.
+  delay(500);
   if (++g_redrawsSinceClean >= QUALITY_CLEAN_INTERVAL) {
     Serial.println("[drawUI] periodic ghosting clean pass");
     auto &d = M5.Display;

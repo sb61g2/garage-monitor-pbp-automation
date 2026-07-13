@@ -71,7 +71,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "21";
+const char* FIRMWARE_VERSION = "22";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -641,7 +641,7 @@ void drawUI() {
   bool wifiWasOn = (WiFi.status() == WL_CONNECTED);
   if (wifiWasOn) {
     WiFi.mode(WIFI_OFF);
-    delay(300);
+    delay(500);
   }
   // BLE and WiFi share the same 2.4GHz RF front end on the ESP32-S3, so
   // treat active BLE the same way as WiFi above: fully quiet before the
@@ -650,8 +650,22 @@ void drawUI() {
   // treated as the same class of risk by default pending its own check.
   if (g_bleConnected || bleIsAdvertising()) {
     bleTeardown();
-    delay(300);
+    delay(500);
   }
+  // Extra settle time regardless of which radio was active - dropped
+  // entirely in v16 on the assumption that DU/fast mode's simpler
+  // single-pass waveform wouldn't need the ~1.6s of settling epd_quality
+  // used to get. Real-world evidence says otherwise: content drawn last in
+  // drawUIOnce() (row labels, the final slots) reproducibly faded/vanished
+  // specifically on redraws that immediately followed a burst of WiFi
+  // activity (refreshLayoutAndSlots()'s dozen-plus sequential HTTP calls),
+  // while the same code path rendered perfectly on the very first boot
+  // redraw (before any WiFi activity had happened at all) - the same
+  // "content drawn later in the scan corrupts first" signature as the
+  // original documented WiFi-interference bug. The RF-quiesce requirement
+  // looks independent of epd_mode; a smaller settle than epd_quality's old
+  // 800+800ms, not zero, is the fix.
+  delay(300);
   if (++g_redrawsSinceClean >= QUALITY_CLEAN_INTERVAL) {
     Serial.println("[drawUI] periodic ghosting clean pass");
     auto &d = M5.Display;

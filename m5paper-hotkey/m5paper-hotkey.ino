@@ -33,17 +33,18 @@
 // RAM/peripheral state (no full re-init needed on wake), at the cost of
 // less dramatic power savings than deep sleep would have given.
 //
-// WiFi is not used at all in normal operation - BLE (see below) is the
-// primary and only path for a successful tap. WiFi only spins up lazily,
-// on-demand, if BLE fails and the HTTP fallback actually runs, or on the
-// periodic timer wake for layout/slot config sync and OTA checks. It is
-// deliberately NOT connected at boot - boot draws whatever's already in
-// memory (blank on a cold power-on) rather than spend several seconds
-// connecting before the pad is usable. Real config populates on the first
-// timer wake (or the first fallback-triggering tap) after power-on.
+// WiFi is not used at all during normal touch handling - BLE (see below) is
+// the primary and only path for a successful tap. WiFi only spins up
+// lazily, on-demand, if BLE fails and the HTTP fallback actually runs, or
+// once at boot to pull the real layout/slot config and check for updates
+// (see setup() and checkOTA()). There is no periodic background wake at
+// all - the pad is otherwise fully asleep except when touched - so a power
+// cycle is the only recurring opportunity for a config refresh or an OTA
+// check; a config/firmware change made in HA sits unapplied until the next
+// reboot.
 //
-// OTA: HTTP-pull self-update (HTTPUpdate), checked once per timer wake (not
-// at boot). Compares FIRMWARE_VERSION against a small version.txt hosted on
+// OTA: HTTP-pull self-update (HTTPUpdate), checked once per boot (see
+// setup()). Compares FIRMWARE_VERSION against a small version.txt hosted on
 // the HA Pi's www folder; downloads and flashes the .bin on a mismatch. Not
 // push-based ArduinoOTA, since a device that's mostly asleep (and mostly
 // off WiFi entirely now) can't be continuously listening for a push.
@@ -71,7 +72,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "25";
+const char* FIRMWARE_VERSION = "26";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -86,7 +87,6 @@ const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware
 #define BLE_CHAR_BUTTON_UUID      "5b1e0001-0000-1000-8000-00805f9b0001"
 #define BLE_CHAR_CONFIGDIRTY_UUID "5b1e0003-0000-1000-8000-00805f9b0001"
 #define BLE_CHAR_DEVICEINFO_UUID  "5b1e0004-0000-1000-8000-00805f9b0001"
-#define BLE_SLOT_SENTINEL_REFRESH 0xFE // Button Event value meaning "header refresh button", not a grid slot
 
 uint32_t COL_BLACK;
 uint32_t COL_WHITE;
@@ -132,11 +132,10 @@ void applyOrientation() {
 }
 
 const int HEADER_H = 60; // fixed/compact, was height*0.16 (86px landscape, 154px portrait)
-int16_t g_refreshBtnX, g_refreshBtnY, g_refreshBtnW, g_refreshBtnH;
 
-// Fixed position in the header, mirroring the refresh button on the
-// opposite side - never overlaps header text (which starts to the right
-// of it, see drawUIOnce()) regardless of header text length/font size.
+// Fixed position in the header, on the opposite side from the battery
+// readout - never overlaps header text (which starts to the right of it,
+// see drawUIOnce()) regardless of header text length/font size.
 const int16_t SLEEP_BADGE_X = 8;
 const int16_t SLEEP_BADGE_Y = 6;
 
@@ -216,11 +215,6 @@ void layoutSlots() {
       g_slots[i].h = cellH;
     }
   }
-
-  g_refreshBtnW = 48;
-  g_refreshBtnH = 48;
-  g_refreshBtnX = W - g_refreshBtnW - 8;
-  g_refreshBtnY = 6;
 }
 
 void ensureWiFi() {
@@ -604,9 +598,22 @@ void drawUIOnce(bool forceQuality = false) {
   d.setTextSize(5);
   d.drawString(g_headerText, SLEEP_BADGE_X + ICON_SIZE + 16, HEADER_H / 2);
 
-  const uint8_t* refreshIcon = findIcon("mdi:refresh");
-  if (refreshIcon) {
-    d.drawBitmap(g_refreshBtnX, g_refreshBtnY, refreshIcon, ICON_SIZE, ICON_SIZE, COL_BLACK, COL_WHITE);
+  // Battery %, read once per redraw (same cadence as everything else on
+  // this pad - no separate polling needed, and the user explicitly doesn't
+  // need high accuracy/frequency here). getBatteryLevel() is a single cheap
+  // I2C read of the PaperS3's fuel-gauge IC (pmic_m5pm1 in M5Unified),
+  // returns -1/-2 if unsupported - skip drawing anything in that case
+  // rather than show a nonsense value. Plain text, not an icon - there's no
+  // battery glyph in the curated icon set (icons.h) and one more curated
+  // bitmap isn't worth it for a single number.
+  int batteryLevel = M5.Power.getBatteryLevel();
+  if (batteryLevel >= 0) {
+    bool isCharging = (M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging);
+    String batteryText = String(batteryLevel) + "%" + (isCharging ? "+" : "");
+    d.setTextDatum(middle_right);
+    d.setTextSize(3);
+    d.drawString(batteryText, W - 8, HEADER_H / 2);
+    d.setTextSize(5); // restore header's text size in case anything below relies on it
   }
 
   for (int i = 0; i < g_activeCount; i++) {
@@ -764,11 +771,11 @@ void drawSleepBadge(bool visible) {
 }
 
 // GPIO-only wake, no periodic timer wake - this pad is a "dumb" remote
-// with no background WiFi/BLE activity at all outside of an actual tap or
-// the manual header refresh button, so there's nothing for a periodic wake
-// to do. Removing it means the device sleeps indefinitely until touched,
-// which is the real battery win (each wake/sleep cycle has its own
-// overhead even when it does nothing).
+// with no background WiFi/BLE activity at all outside of an actual tap;
+// config refresh and OTA checks only happen once, at boot (see setup()),
+// so there's nothing for a periodic wake to do. Removing it means the
+// device sleeps indefinitely until touched, which is the real battery win
+// (each wake/sleep cycle has its own overhead even when it does nothing).
 void enterLightSleepAndWait() {
   gpio_wakeup_enable(TOUCH_INT_PIN, GPIO_INTR_LOW_LEVEL);
   esp_sleep_enable_gpio_wakeup();
@@ -818,10 +825,9 @@ void setup() {
   // layoutSlots() lays out whatever's currently in g_slots (all blank on a
   // cold power-on) so the pad has something on screen immediately, then a
   // one-time WiFi pull fills in the real content right after - the pad has
-  // no other automatic path to get real config now that the periodic
-  // background sync is gone (manual refresh is the only recurring path),
-  // so without this a cold boot would otherwise stay blank until someone
-  // taps the header refresh button.
+  // no other automatic path to get real config (no periodic background
+  // sync, no refresh button - see checkOTA() below), so without this a cold
+  // boot would otherwise stay blank until the next power cycle.
   layoutSlots();
   drawUI();
   if (refreshLayoutAndSlots()) {
@@ -847,6 +853,11 @@ void setup() {
     drawUIOnce(true);
     delay(800);
   }
+  // Only place an OTA check happens now that the header refresh button is
+  // gone - every power-cycle boot doubles as the update-check opportunity
+  // instead of a dedicated manual trigger. Runs regardless of whether
+  // refreshLayoutAndSlots() found a layout/slot change above.
+  checkOTA();
 }
 
 void loop() {
@@ -868,21 +879,6 @@ void loop() {
       // is the fast, near-instant "I'm awake" confirmation, decoupled from
       // however long the actual command round-trip takes.
       drawSleepBadge(false);
-      if (t.x >= g_refreshBtnX && t.x <= g_refreshBtnX + g_refreshBtnW &&
-          t.y >= g_refreshBtnY && t.y <= g_refreshBtnY + g_refreshBtnH) {
-        Serial.println("[loop] touch hit header refresh button");
-        // Refresh is WiFi-only, deliberately, not routed through BLE at
-        // all: it has no mapped HA service call, so a successful BLE round
-        // trip for it would do nothing except redraw the same (possibly
-        // stale) data - the whole point of this button is the WiFi resync
-        // itself. This is also the only place a firmware update check
-        // happens now - no periodic background polling, so "manually
-        // triggered refresh" is the one moment WiFi comes up on its own.
-        refreshLayoutAndSlots();
-        drawUI();
-        checkOTA();
-        handledTouch = true;
-      }
       for (int i = 0; !handledTouch && i < g_activeCount; i++) {
         Slot &s = g_slots[i];
         if (t.x >= s.x && t.x <= s.x + s.w && t.y >= s.y && t.y <= s.y + s.h) {

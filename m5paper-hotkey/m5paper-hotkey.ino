@@ -70,7 +70,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "16";
+const char* FIRMWARE_VERSION = "17";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -639,13 +639,13 @@ void drawUI() {
   drawUIOnce();
 }
 
-// Genuinely momentary "command received" feedback - a brief epd_fast pulse
-// of just the tapped tile, immediately followed by a full drawUI() that
-// repaints everything anyway, so any imprecision never persists. Always
-// called after BLE teardown or with the WiFi call already complete, so it
-// never races an active radio connection, matching every other display()
-// call in this sketch. Not a state to track - the very next drawUI() call
-// (always neutral, see drawUIOnce()) is what actually settles the screen.
+// Immediate "touch received" feedback - a brief epd_fast pulse of just the
+// tapped tile, fired before BLE/WiFi even start (see loop()) so the pad
+// visibly reacts the instant it registers the tap rather than after however
+// long the BLE-then-WiFi-fallback round trip takes. No active radio
+// connection exists yet at this point in the flow, so it can't race one.
+// Not a state to track - the drawUI() that follows once the action has
+// actually run always repaints neutral, so this never lingers.
 void flashPressedFeedback(const Slot &s) {
   auto &d = M5.Display;
   d.setEpdMode(epd_mode_t::epd_fast);
@@ -770,17 +770,20 @@ void loop() {
         Slot &s = g_slots[i];
         if (t.x >= s.x && t.x <= s.x + s.w && t.y >= s.y && t.y <= s.y + s.h) {
           Serial.printf("[loop] touch hit slot %d ('%s')\n", i, s.label.c_str());
+          // Drawn immediately, before BLE/WiFi even start - confirms the tap
+          // was received the instant it happened, decoupled from however
+          // long the BLE-then-WiFi-fallback round trip takes (BLE alone has
+          // a 4s connect timeout - see tryBleInteraction()). Not tied to
+          // whether the downstream HA action specifically succeeds; always
+          // followed by the normal neutral drawUI() below once the action
+          // has actually run, so it never lingers.
+          flashPressedFeedback(s);
           if (!tryBleInteraction((uint8_t)i)) {
             if (s.domain.length() && s.service.length() && s.entity.length()) {
               haCallService(s.domain, s.service, s.entity);
             }
             refreshLayoutAndSlots();
           }
-          // Confirms the tap was received/handled, regardless of which path
-          // (BLE or WiFi fallback) processed it - not tied to whether the
-          // downstream HA action specifically succeeded. Always followed by
-          // the normal neutral drawUI() below, so it never lingers.
-          flashPressedFeedback(s);
           drawUI();
           handledTouch = true;
           break;

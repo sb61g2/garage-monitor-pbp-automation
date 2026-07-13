@@ -70,7 +70,7 @@ const char* LAYOUT_ENTITY = "input_text.garage_monitor_layout_config";
 const int MAX_SLOTS = 12;
 #define TOUCH_INT_PIN GPIO_NUM_48 // GT911 INT, active-low, NOT RTC-capable (deep sleep wake unusable)
 
-const char* FIRMWARE_VERSION = "18";
+const char* FIRMWARE_VERSION = "19";
 const char* OTA_VERSION_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/version.txt";
 const char* OTA_BIN_URL = "http://192.168.7.1:8123/local/m5paper-hotkey/firmware.bin";
 
@@ -342,8 +342,12 @@ bool haCallService(const String &domain, const String &service, const String &en
 }
 
 void checkOTA() {
+  Serial.printf("[ota] checking, running FIRMWARE_VERSION=%s\n", FIRMWARE_VERSION);
   ensureWiFi();
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[ota] WiFi not connected, skipping check");
+    return;
+  }
   HTTPClient http;
   http.begin(OTA_VERSION_URL);
   http.setTimeout(5000);
@@ -354,10 +358,15 @@ void checkOTA() {
     remoteVersion.trim();
   }
   http.end();
+  Serial.printf("[ota] version.txt GET code=%d remoteVersion='%s'\n", code, remoteVersion.c_str());
   if (remoteVersion.length() && remoteVersion != String(FIRMWARE_VERSION)) {
+    Serial.println("[ota] mismatch, starting update");
     WiFiClient client;
     httpUpdate.rebootOnUpdate(true);
-    httpUpdate.update(client, OTA_BIN_URL); // reboots automatically on success
+    t_httpUpdate_return ret = httpUpdate.update(client, OTA_BIN_URL); // reboots automatically on success
+    Serial.printf("[ota] httpUpdate.update() returned %d (%s)\n", ret, httpUpdate.getLastErrorString().c_str());
+  } else {
+    Serial.println("[ota] up to date");
   }
 }
 
@@ -714,7 +723,7 @@ void enterLightSleepAndWait() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("[setup] booting");
+  Serial.printf("[setup] booting, FIRMWARE_VERSION=%s\n", FIRMWARE_VERSION);
   auto cfg = M5.config();
   M5.begin(cfg);
 
@@ -785,7 +794,8 @@ void loop() {
       for (int i = 0; !handledTouch && i < g_activeCount; i++) {
         Slot &s = g_slots[i];
         if (t.x >= s.x && t.x <= s.x + s.w && t.y >= s.y && t.y <= s.y + s.h) {
-          Serial.printf("[loop] touch hit slot %d ('%s')\n", i, s.label.c_str());
+          unsigned long tTouch = millis();
+          Serial.printf("[loop] t=%lu touch hit slot %d ('%s')\n", tTouch, i, s.label.c_str());
           // Drawn immediately, before BLE/WiFi even start - confirms the tap
           // was received the instant it happened, decoupled from however
           // long the BLE-then-WiFi-fallback round trip takes (BLE alone has
@@ -794,13 +804,17 @@ void loop() {
           // followed by the normal neutral drawUI() below once the action
           // has actually run, so it never lingers.
           flashPressedFeedback(s);
+          Serial.printf("[loop] t=%lu (+%lums) flashPressedFeedback done\n", millis(), millis() - tTouch);
           if (!tryBleInteraction((uint8_t)i)) {
+            Serial.printf("[loop] t=%lu (+%lums) BLE failed, falling back to WiFi\n", millis(), millis() - tTouch);
             if (s.domain.length() && s.service.length() && s.entity.length()) {
               haCallService(s.domain, s.service, s.entity);
             }
             refreshLayoutAndSlots();
           }
+          Serial.printf("[loop] t=%lu (+%lums) action path done, drawing UI\n", millis(), millis() - tTouch);
           drawUI();
+          Serial.printf("[loop] t=%lu (+%lums) drawUI done\n", millis(), millis() - tTouch);
           handledTouch = true;
           break;
         }
